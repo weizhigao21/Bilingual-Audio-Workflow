@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.spec.bak
+build/
+dist/
+*.egg-info/
+.DS_Store
+Thumbs.db
+workspace/
+resources/tts_audio_cache/
+resources/batch_tts_output/
+resources/logs/
+resources/configs/tts_audio_cache.db
+.workbuddy/
