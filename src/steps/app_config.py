@@ -27,7 +27,25 @@ def _check_ffmpeg_capabilities():
         return False, False
 
 
-NVENC_AVAILABLE, AAC_NVENC_AVAILABLE = _check_ffmpeg_capabilities()
+_NVENC_CHECKED = False
+_NVENC_AVAILABLE = False
+_AAC_NVENC_AVAILABLE = False
+
+
+def is_nvenc_available():
+    global _NVENC_CHECKED, _NVENC_AVAILABLE, _AAC_NVENC_AVAILABLE
+    if not _NVENC_CHECKED:
+        _NVENC_AVAILABLE, _AAC_NVENC_AVAILABLE = _check_ffmpeg_capabilities()
+        _NVENC_CHECKED = True
+    return _NVENC_AVAILABLE
+
+
+def is_aac_nvenc_available():
+    global _NVENC_CHECKED, _NVENC_AVAILABLE, _AAC_NVENC_AVAILABLE
+    if not _NVENC_CHECKED:
+        _NVENC_AVAILABLE, _AAC_NVENC_AVAILABLE = _check_ffmpeg_capabilities()
+        _NVENC_CHECKED = True
+    return _AAC_NVENC_AVAILABLE
 
 
 def _check_cuda():

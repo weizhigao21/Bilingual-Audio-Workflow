@@ -16,11 +16,6 @@ from .task_manager import (
     STEP_PENDING, STEP_RUNNING, STEP_DONE, STEP_FAILED, STEP_SKIPPED
 )
 from .widgets import StepPanel, TaskListWidget, TTSConfigPanel, MixerConfigPanel, WhisperConfigPanel
-from .steps.step1_whisper import WhisperWorker
-from .steps.step2_tts import TTSBridgeWorker
-from .steps.step3_mixer import MixerWorker
-from .steps.audio_utils import clear_mix_cache, clear_voice_cache
-from .steps.batch_executor import BatchExecutor
 
 
 # 文件类型分类
@@ -36,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v1.2.0")
+        self.setWindowTitle("双语音声工作流 v1.3.0")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -566,6 +561,7 @@ class WorkflowMainWindow(QMainWindow):
         order = order_combo.currentData()
 
         # 启动批量执行
+        from .steps.batch_executor import BatchExecutor
         self._batch_executor = BatchExecutor(
             list(self.task_queue.tasks), steps, self.config,
             order=order, parent=self
@@ -721,7 +717,11 @@ class WorkflowMainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", f"步骤 {step} 的前置步骤尚未完成。")
             return
 
-        # 创建 worker
+        # 创建 worker（延迟导入步骤模块，避免启动时加载重库）
+        from .steps.step1_whisper import WhisperWorker
+        from .steps.step2_tts import TTSBridgeWorker
+        from .steps.step3_mixer import MixerWorker
+
         if step == 1:
             worker = WhisperWorker(task, self.config)
         elif step == 2:
@@ -794,6 +794,7 @@ class WorkflowMainWindow(QMainWindow):
         self.task_queue.update_task(task)
         self._refresh_step_panels(task)
         if step == 3:
+            from .steps.audio_utils import clear_mix_cache, clear_voice_cache
             clear_mix_cache()
             clear_voice_cache()
 

@@ -53,13 +53,20 @@ class WhisperWorker(QThread):
 
         cfg = self.config.whisper_cfg
         source_path = self.task.source_path
-        # 字幕输出到源文件所在目录
-        output_dir = os.path.dirname(source_path)
+        # 字幕最终会出现在源文件所在目录
+        search_dir = os.path.dirname(source_path)
+        # 文件夹导入的任务直接传文件夹（infer.exe 会自动扫描其中的音频），
+        # 单独添加的文件则传文件本身
+        if self.task.from_folder and self.task.import_folder:
+            input_path = self.task.import_folder
+            output_dir = ""  # 文件夹模式不指定输出目录，字幕输出到各音频所在目录
+        else:
+            input_path = source_path
+            output_dir = search_dir
 
         # 构建命令行
         cmd = [
             infer_exe,
-            "--output_dir", output_dir,
             "--sub_formats", cfg.get("sub_formats", "lrc"),
             "--audio_suffixes", cfg.get("audio_suffixes", "wav,flac,mp3,mp4,mkv,avi,mov"),
             "--device", cfg.get("device", "auto"),
@@ -69,6 +76,8 @@ class WhisperWorker(QThread):
             "--vad_min_speech_duration_ms", str(cfg.get("vad_min_speech_duration_ms", 0)),
             "--vad_speech_pad_ms", str(cfg.get("vad_speech_pad_ms", 400)),
         ]
+        if output_dir:
+            cmd.extend(["--output_dir", output_dir])
         if cfg.get("enable_batching", False):
             cmd.append("--enable_batching")
         if cfg.get("overwrite", False):
@@ -83,11 +92,11 @@ class WhisperWorker(QThread):
         else:
             cmd.append("--no_merge_segments")
 
-        # 源文件路径作为 positional 参数
-        cmd.append(source_path)
+        # 文件夹或源文件路径作为 positional 参数
+        cmd.append(input_path)
 
-        self.log_signal.emit(f"[字幕提取] 启动: {os.path.basename(source_path)}")
-        self.log_signal.emit(f"[字幕提取] 输出目录: {output_dir}")
+        self.log_signal.emit(f"[字幕提取] 启动: {input_path}")
+        self.log_signal.emit(f"[字幕提取] 输出目录: {search_dir}")
         self.log_signal.emit(
             f"[字幕配置] 设备={cfg.get('device', 'auto')}, "
             f"精度={cfg.get('compute_type', 'auto')}, "
@@ -161,17 +170,18 @@ class WhisperWorker(QThread):
             fmt = fmt.strip()
             if not fmt:
                 continue
-            expected = os.path.join(output_dir, f"{self.task.source_name}.{fmt}")
+            expected = os.path.join(search_dir, f"{self.task.source_name}.{fmt}")
             if os.path.exists(expected):
                 found_sub = expected
                 break
 
-        # 如果精确名没找到，扫描目录里第一个匹配的
-        if not found_sub:
-            for f in os.listdir(output_dir):
+        # 如果精确名没找到，扫描目录里第一个匹配的（仅单独文件模式；
+        # 文件夹模式下目录中可能混入其它文件的字幕，避免误匹配）
+        if not found_sub and not (self.task.from_folder and self.task.import_folder):
+            for f in os.listdir(search_dir):
                 for fmt in sub_formats:
                     if f.endswith(f".{fmt.strip()}"):
-                        found_sub = os.path.join(output_dir, f)
+                        found_sub = os.path.join(search_dir, f)
                         break
                 if found_sub:
                     break
@@ -268,16 +278,22 @@ class WhisperBatchWorker(QThread):
         else:
             cmd.append("--no_merge_segments")
 
-        # 所有源文件路径作为 positional 参数
-        source_paths = [t.source_path for t in self.tasks]
-        cmd.extend(source_paths)
+        # 以文件夹作为输入：文件夹导入的任务传拖入的文件夹，否则传文件所在目录。
+        # infer.exe 自动扫描文件夹中的音频，避免逐个文件处理。
+        folder_set = {}
+        for t in self.tasks:
+            folder = (t.import_folder if t.from_folder and t.import_folder
+                      else os.path.dirname(t.source_path))
+            folder_set[folder] = True
+        input_dirs = list(folder_set.keys())
+        cmd.extend(input_dirs)
 
         self.log_signal.emit(
-            f"[字幕批量] 启动: {len(source_paths)} 个文件, "
+            f"[字幕批量] 启动: {len(input_dirs)} 个文件夹, "
             f"设备={cfg.get('device', 'auto')}, 精度={cfg.get('compute_type', 'auto')}"
         )
-        for t in self.tasks:
-            self.log_signal.emit(f"[字幕批量]   - {t.source_name}")
+        for d in input_dirs:
+            self.log_signal.emit(f"[字幕批量]   - {d}")
 
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self._process = subprocess.Popen(

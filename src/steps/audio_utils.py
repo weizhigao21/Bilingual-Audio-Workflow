@@ -13,7 +13,7 @@ from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
 
-from .app_config import AAC_NVENC_AVAILABLE
+from .app_config import is_aac_nvenc_available
 
 try:
     import numpy as np
@@ -709,7 +709,7 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=
                 output_path
             ]
         elif format_type in ("aac", "m4a"):
-            if AAC_NVENC_AVAILABLE:
+            if is_aac_nvenc_available():
                 cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-i", temp_wav.name,

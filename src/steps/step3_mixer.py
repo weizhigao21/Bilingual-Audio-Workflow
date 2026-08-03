@@ -26,7 +26,7 @@ from .audio_utils import (
     clear_mix_cache,
     clear_voice_cache,
 )
-from .app_config import NVENC_AVAILABLE, is_cuda_available
+from .app_config import is_nvenc_available, is_cuda_available
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"}
@@ -217,7 +217,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         else:
             use_gpu = (
                 cfg.get("use_gpu", True)
-                and NVENC_AVAILABLE and is_cuda_available()
+                and is_nvenc_available() and is_cuda_available()
                 and output_format in ("mp3", "m4a", "aac")
             )
             if use_gpu:

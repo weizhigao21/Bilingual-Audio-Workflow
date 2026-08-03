@@ -1,4 +1,6 @@
-# 双语音声工作流 v1.2.0
+# 双语音声工作流 v1.3.0
+
+[![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
 基于 PyQt6 的三步式配音工作流工具：**字幕提取 → 语音合成 → 音频混音**，一键批量处理，输出双语配音视频/音频。
 
@@ -92,9 +94,11 @@ pip install pyinstaller
 pyinstaller 双语音声工作流.spec
 ```
 
-输出文件：`dist/双语音声工作流.exe`（无控制台窗口，已包含应用图标）
+输出目录：`dist/双语音声工作流/`，内含 `双语音声工作流.exe` 及全部依赖文件，启动即开无需解压。
 
 > 注意：`infer.exe`（faster-whisper）需要单独部署，不包含在打包中。
+
+> 分发时将整个 `双语音声工作流/` 文件夹打包为 zip 即可。
 
 ## 目录结构
 
@@ -137,6 +141,17 @@ TTS 合成结果基于 **文本内容 + 声音模型** 进行 MD5 去重缓存�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v1.3.0 (2026-08-03)
+- 步骤1 字幕提取支持文件夹模式：文件夹导入的任务直接传文件夹给 infer.exe，自动扫描其中全部音频，避免逐个文件处理；批量模式同样改为传去重后的文件夹列表，显著提升处理速度
+- 文件夹模式下字幕查找仅使用精确文件名匹配，避免误关联同目录下其它文件的字幕
+- 优化打包体积：spec 排除误收集的无关依赖（Pythonwin、pythonnet、PIL、cryptography、pydantic 等）及未使用的 Qt DLL（Qt6Pdf/Qt6Network/Qt6Svg），打包体积由 93.3MB 降至 64.2MB
+
+### v1.2.2 (2026-07-29)
+- 优化启动速度：将步骤模块（whisper/tts/mixer/audio_utils/batch_executor）改为延迟导入，避免启动时加载 numpy、pydub、edge-tts、requests 等重型库
+
+### v1.2.1 (2026-07-29)
+- 优化启动速度：ffmpeg NVENC 检测从模块导入时改为懒加载，避免启动时阻塞等待 `ffmpeg -encoders`
 
 ### v1.2.0
 - TTS 配置面板新增缓存管理：显示缓存大小和复用统计，支持一键清除
