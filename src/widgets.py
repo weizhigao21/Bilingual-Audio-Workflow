@@ -479,6 +479,27 @@ class TTSConfigPanel(QGroupBox):
         self.threads_spin.valueChanged.connect(self._save)
         edge_layout.addWidget(self.threads_spin, 3, 1)
 
+        edge_layout.addWidget(QLabel("全局并发上限:"), 4, 0)
+        self.max_concurrent_spin = QSpinBox()
+        self.max_concurrent_spin.setRange(1, 20)
+        self.max_concurrent_spin.setToolTip(
+            "多个任务并行合成时（如流水线模式）的总并发请求数上限。\n"
+            "过高会触发微软服务限流（Cannot connect to ...bing.com:443），建议 5-8"
+        )
+        self.max_concurrent_spin.valueChanged.connect(self._save)
+        edge_layout.addWidget(self.max_concurrent_spin, 4, 1)
+
+        edge_layout.addWidget(QLabel("流水线语音并行:"), 5, 0)
+        self.pipeline_tts_spin = QSpinBox()
+        self.pipeline_tts_spin.setRange(1, 10)
+        self.pipeline_tts_spin.setToolTip(
+            "流水线模式下同时进行语音生成的音频数（任务级并行）。\n"
+            "设 1 = 按音频逐个生成语音；2 = 最多 2 个音频同时生成。\n"
+            "「线程数」控制单个音频内部的片段并发。"
+        )
+        self.pipeline_tts_spin.valueChanged.connect(self._save)
+        edge_layout.addWidget(self.pipeline_tts_spin, 5, 1)
+
         # api 模式配置
         self.api_group = QGroupBox("API 服务器参数")
         api_layout = QGridLayout(self.api_group)
@@ -533,7 +554,9 @@ class TTSConfigPanel(QGroupBox):
         cfg = self.config.tts_cfg
         # 阻断信号，防止加载过程中 _on_mode_changed→_save 覆盖配置
         widgets = [self.mode_combo, self.voice_combo, self.rate_combo,
-                   self.volume_combo, self.threads_spin, self.api_combo,
+                   self.volume_combo, self.threads_spin,
+                   self.max_concurrent_spin, self.pipeline_tts_spin,
+                   self.api_combo,
                    self.bulk_spin, self.multi_api_check, self.bulk_check]
         for w in widgets:
             w.blockSignals(True)
@@ -551,6 +574,8 @@ class TTSConfigPanel(QGroupBox):
             self.rate_combo.setCurrentText(cfg.get("edge_rate", "+0%"))
             self.volume_combo.setCurrentText(cfg.get("edge_volume", "+0%"))
             self.threads_spin.setValue(cfg.get("edge_threads", 5))
+            self.max_concurrent_spin.setValue(cfg.get("edge_max_concurrent", 8))
+            self.pipeline_tts_spin.setValue(cfg.get("pipeline_tts_workers", 2))
             # api 参数
             self._refresh_api_combo()
             self.bulk_spin.setValue(cfg.get("bulk_batch_size", 20))
@@ -625,6 +650,8 @@ class TTSConfigPanel(QGroupBox):
         cfg["edge_rate"] = self.rate_combo.currentText()
         cfg["edge_volume"] = self.volume_combo.currentText()
         cfg["edge_threads"] = self.threads_spin.value()
+        cfg["edge_max_concurrent"] = self.max_concurrent_spin.value()
+        cfg["pipeline_tts_workers"] = self.pipeline_tts_spin.value()
         cfg["bulk_batch_size"] = self.bulk_spin.value()
         cfg["use_multi_api"] = self.multi_api_check.isChecked()
         cfg["use_bulk_api"] = self.bulk_check.isChecked()

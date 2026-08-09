@@ -28,6 +28,12 @@ class WhisperWorker(QThread):
         self.config = config
         self._stop_flag = False
         self._process = None
+        # 同步结果：(success, output_path_or_error)，供流水线模式 wait() 后读取
+        self.result = (False, "未执行")
+
+    def _emit_finished(self, ok: bool, msg: str):
+        self.result = (ok, msg)
+        self.finished_signal.emit(ok, msg)
 
     def stop(self):
         self._stop_flag = True
@@ -42,13 +48,13 @@ class WhisperWorker(QThread):
             self._run_impl()
         except Exception as e:
             self.log_signal.emit(f"[字幕提取] 异常: {e}")
-            self.finished_signal.emit(False, str(e))
+            self._emit_finished(False, str(e))
 
     def _run_impl(self):
         whisper_dir = self.config.whisper_dir
         infer_exe = os.path.join(whisper_dir, "infer.exe")
         if not os.path.exists(infer_exe):
-            self.finished_signal.emit(False, f"找不到 infer.exe: {infer_exe}")
+            self._emit_finished(False, f"找不到 infer.exe: {infer_exe}")
             return
 
         cfg = self.config.whisper_cfg
@@ -151,11 +157,11 @@ class WhisperWorker(QThread):
 
         if self._stop_flag:
             self.log_signal.emit("[字幕提取] 已中止")
-            self.finished_signal.emit(False, "用户中止")
+            self._emit_finished(False, "用户中止")
             return
 
         if ret != 0:
-            self.finished_signal.emit(False, f"infer.exe 退出码: {ret}")
+            self._emit_finished(False, f"infer.exe 退出码: {ret}")
             return
 
         # 查找生成的字幕文件
@@ -181,12 +187,12 @@ class WhisperWorker(QThread):
                     break
 
         if not found_sub:
-            self.finished_signal.emit(False, "字幕提取完成但未找到输出文件")
+            self._emit_finished(False, "字幕提取完成但未找到输出文件")
             return
 
         self.progress_signal.emit(100)
         self.log_signal.emit(f"[字幕提取] 完成: {found_sub}")
-        self.finished_signal.emit(True, found_sub)
+        self._emit_finished(True, found_sub)
 
 
 class WhisperBatchWorker(QThread):

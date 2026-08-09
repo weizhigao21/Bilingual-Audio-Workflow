@@ -55,6 +55,8 @@ DEFAULT_CONFIG = {
         "edge_rate": "+0%",
         "edge_volume": "+0%",
         "edge_threads": 5,
+        "edge_max_concurrent": 8,
+        "pipeline_tts_workers": 2,
         "use_bulk_api": True,
         "bulk_batch_size": 20,
         "use_multi_api": False,

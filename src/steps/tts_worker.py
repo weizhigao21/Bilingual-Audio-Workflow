@@ -15,6 +15,7 @@ from .tts_utils import (
     tts_task,
     tts_bulk_task,
     edge_tts_task,
+    set_edge_max_concurrent,
 )
 
 
@@ -350,7 +351,13 @@ class TTSWorker(QThread):
         volume = self.config.get("edge_volume", "+0%")
         max_workers = self.config.get("edge_threads", 3)
 
-        self.log_signal.emit(f"使用Edge TTS模式，声音: {voice}，线程数: {max_workers}")
+        # 设置 Edge TTS 全局并发上限：多个任务并行合成时，
+        # 总并发请求数不超过该值，避免触发微软服务限流
+        set_edge_max_concurrent(self.config.get("edge_max_concurrent", 8))
+        self.log_signal.emit(
+            f"使用Edge TTS模式，声音: {voice}，线程数: {max_workers}，"
+            f"全局并发上限: {self.config.get('edge_max_concurrent', 8)}"
+        )
 
         total = len(pending_tasks)
         pending_completed = 0

@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v1.5.0")
+        self.setWindowTitle("双语音声工作流 v2.0.0")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -547,6 +547,7 @@ class WorkflowMainWindow(QMainWindow):
         order_layout = QHBoxLayout(order_group)
         order_layout.addWidget(QLabel("模式:"))
         order_combo = QComboBox()
+        order_combo.addItem("流水线：语音与混音交错并行（最快）", "pipeline")
         order_combo.addItem("按步骤：先全部字幕→再全部语音→再全部混音", "by_step")
         order_combo.addItem("按任务：每个任务跑完三步再跑下一个", "by_task")
         order_layout.addWidget(order_combo, 1)
@@ -576,6 +577,7 @@ class WorkflowMainWindow(QMainWindow):
 
         # 启动批量执行
         from .steps.batch_executor import BatchExecutor
+        self._tts_total = 0  # 批量/流水线模式下进度为任务级累计，重置片段总数
         self._batch_executor = BatchExecutor(
             list(self.task_queue.tasks), steps, self.config,
             order=order, parent=self
@@ -859,6 +861,7 @@ class WorkflowMainWindow(QMainWindow):
             return
 
         from .steps.batch_executor import BatchExecutor
+        self._tts_total = 0  # 组执行时进度为任务级累计，重置片段总数
         self._batch_executor = BatchExecutor(
             list(group.tasks), [step], self.config, order="by_task", parent=self
         )
@@ -980,20 +983,30 @@ class WorkflowMainWindow(QMainWindow):
         """批量完成后，延迟半秒再统一重命名所有文件夹导入的源文件夹。
         延迟是为了让所有线程/子进程释放文件句柄。
         """
+        self._rename_retry_count = 0
         QTimer.singleShot(500, self._do_rename_batch_folders)
 
     def _do_rename_batch_folders(self):
-        """执行批量重命名逻辑。"""
+        """执行批量重命名逻辑。
+
+        收集条件与单任务模式保持一致：已完成(STEP_DONE) 或 已跳过
+        (STEP_SKIPPED，如自动检测到已有双语输出) 的文件夹导入任务。
+        若有重命名失败（文件句柄未释放等），稍后整体重试（幂等：已加前缀的跳过）。
+        """
         try:
             # 收集需要重命名的文件夹（去重）
             folders_to_rename = set()
             for t in self.task_queue.tasks:
-                if t.from_folder and t.step3_status == STEP_DONE:
+                if t.from_folder and t.step3_status in (STEP_DONE, STEP_SKIPPED):
                     source_dir = t.import_folder or os.path.dirname(t.source_path)
                     dir_name = os.path.basename(source_dir)
                     if not dir_name.startswith("双语-"):
                         folders_to_rename.add(source_dir)
 
+            if not folders_to_rename:
+                return
+
+            any_failed = False
             for folder in sorted(folders_to_rename):
                 parent = os.path.dirname(folder)
                 dir_name = os.path.basename(folder)
@@ -1012,6 +1025,7 @@ class WorkflowMainWindow(QMainWindow):
                         if attempt < 3:
                             time.sleep(0.5)
                 if not renamed:
+                    any_failed = True
                     self._append_log(f"[重命名] 失败 (已重试3次): {dir_name}")
                     continue
                 for t in self.task_queue.tasks:
@@ -1024,6 +1038,14 @@ class WorkflowMainWindow(QMainWindow):
                     except ValueError:
                         continue
                 self._append_log(f"[重命名] 文件夹已重命名: {dir_name} → {new_name}")
+
+            # 有失败的，稍后整体重试（最多 3 次；已成功的不受影响）
+            if any_failed:
+                self._rename_retry_count = getattr(self, "_rename_retry_count", 0) + 1
+                if self._rename_retry_count <= 3:
+                    self._append_log(f"[重命名] 有文件夹未重命名，1.5 秒后重试 "
+                                     f"({self._rename_retry_count}/3)")
+                    QTimer.singleShot(1500, self._do_rename_batch_folders)
         except Exception:
             pass
 

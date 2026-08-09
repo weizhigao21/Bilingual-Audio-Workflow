@@ -33,7 +33,7 @@ from PyQt6.QtGui import QIcon
 from src.workflow_gui import WorkflowMainWindow
 from src.config import WorkflowConfig
 
-VERSION = "v1.5.0"
+VERSION = "v2.0.0"
 
 _ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "resources", "configs", "ui.ico")

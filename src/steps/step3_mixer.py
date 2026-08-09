@@ -280,6 +280,8 @@ class MixerWorker(QThread):
         self.task = task
         self.config = config
         self._stop_flag = False
+        # 同步结果：(success, output_path_or_error)，供流水线模式 wait() 后读取
+        self.result = (False, "未执行")
 
     def stop(self):
         self._stop_flag = True
@@ -294,6 +296,7 @@ class MixerWorker(QThread):
             progress_callback=self.progress_signal.emit,
             stop_check=self._check_stop,
         )
+        self.result = (ok, msg)
         self.finished_signal.emit(ok, msg)
 
 

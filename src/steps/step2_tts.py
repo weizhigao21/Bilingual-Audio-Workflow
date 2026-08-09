@@ -3,7 +3,7 @@
 import os
 import hashlib
 
-from PyQt6.QtCore import QThread, pyqtSignal, QEventLoop
+from PyQt6.QtCore import QThread, pyqtSignal, QEventLoop, Qt
 
 from ..config import WorkflowConfig
 from ..task_manager import TaskInfo
@@ -27,6 +27,12 @@ class TTSBridgeWorker(QThread):
         self.config = config
         self._tts_worker = None
         self._total = 0
+        # 同步结果：(success, output_dir_or_error)，供流水线模式 wait() 后读取
+        self.result = (False, "未执行")
+
+    def _emit_finished(self, ok: bool, msg: str):
+        self.result = (ok, msg)
+        self.finished_signal.emit(ok, msg)
 
     def stop(self):
         if self._tts_worker:
@@ -48,13 +54,13 @@ class TTSBridgeWorker(QThread):
             self._run_impl()
         except Exception as e:
             self.log_signal.emit(f"[语音生成] 异常: {e}")
-            self.finished_signal.emit(False, str(e))
+            self._emit_finished(False, str(e))
 
     def _run_impl(self):
         # 检查字幕文件
         lrc_path = self.task.step1_output
         if not lrc_path or not os.path.exists(lrc_path):
-            self.finished_signal.emit(False, f"字幕文件不存在: {lrc_path}")
+            self._emit_finished(False, f"字幕文件不存在: {lrc_path}")
             return
 
         cfg = self.config.tts_cfg
@@ -104,9 +110,16 @@ class TTSBridgeWorker(QThread):
         self._tts_worker = TTSWorker(tts_config)
         self._tts_worker.log_signal.connect(self.log_signal.emit)
         self._tts_worker.progress_signal.connect(self.progress_signal.emit)
-        self._tts_worker.total_tasks_signal.connect(self._on_total)
+        # 完成/总数回调必须用 DirectConnection：
+        # 在流水线模式下 TTSBridgeWorker 可能创建于无事件循环的 python 线程，
+        # QueuedConnection 的信号永远不会被处理，导致 result 不被写入
+        self._tts_worker.total_tasks_signal.connect(
+            self._on_total, Qt.ConnectionType.DirectConnection
+        )
         self._tts_worker.eta_signal.connect(self.eta_signal.emit)
-        self._tts_worker.finished_signal.connect(self._on_finished)
+        self._tts_worker.finished_signal.connect(
+            self._on_finished, Qt.ConnectionType.DirectConnection
+        )
 
         # 启动 TTSWorker（QThread），用 QEventLoop 等待其完成
         # 不用 wait() 是因为它会阻塞线程不处理事件，导致 progress_signal 信号丢失
@@ -123,7 +136,7 @@ class TTSBridgeWorker(QThread):
     def _on_finished(self, success: bool):
         """TTSWorker 完成回调。"""
         if not success:
-            self.finished_signal.emit(False, "TTS 合成失败，详见日志")
+            self._emit_finished(False, "TTS 合成失败，详见日志")
             return
 
         # 查找输出目录：workspace_root/<subtitle_md5>/
@@ -136,8 +149,8 @@ class TTSBridgeWorker(QThread):
             output_dir = ""
 
         if not output_dir:
-            self.finished_signal.emit(False, "TTS 完成但未找到输出目录")
+            self._emit_finished(False, "TTS 完成但未找到输出目录")
             return
 
         self.log_signal.emit(f"[语音生成] 完成: {output_dir}")
-        self.finished_signal.emit(True, output_dir)
+        self._emit_finished(True, output_dir)

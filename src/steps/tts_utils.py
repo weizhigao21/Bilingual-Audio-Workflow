@@ -6,6 +6,7 @@ import hashlib
 import requests
 import shutil
 import asyncio
+import threading
 import edge_tts
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .tts_logger import logger
@@ -16,6 +17,37 @@ ES_DISPLAY_REQUIRED = 0x00000002
 
 # 复用HTTP会话
 _session = requests.Session()
+
+# ---------- Edge TTS 全局并发限流 ----------
+# 多个任务并行合成时（如流水线模式），每个 TTSWorker 内部又有多个线程并发，
+# 总并发可能叠加到几十路请求，触发微软服务限流
+# （Cannot connect to host speech.platform.bing.com:443）。
+# 用条件变量把全局并发请求数限制在上限之内。
+_edge_lock = threading.Lock()
+_edge_cond = threading.Condition(_edge_lock)
+_edge_active = 0
+_edge_max_concurrent = 8
+
+
+def set_edge_max_concurrent(n):
+    """设置 Edge TTS 全局并发上限（由 TTSWorker 每次运行前调用）。"""
+    global _edge_max_concurrent
+    _edge_max_concurrent = max(1, int(n))
+
+
+def _edge_acquire():
+    global _edge_active
+    with _edge_cond:
+        while _edge_active >= _edge_max_concurrent:
+            _edge_cond.wait()
+        _edge_active += 1
+
+
+def _edge_release():
+    global _edge_active
+    with _edge_cond:
+        _edge_active -= 1
+        _edge_cond.notify_all()
 
 
 def set_sleep_mode(prevent=True):
@@ -272,28 +304,33 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
             logger.warning(f"Edge TTS缓存复制失败: {file_name} - {e}")
 
     last_error = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.debug(f"Edge TTS生成 (尝试 {attempt}/{max_retries}): 声音={voice}, 文本={text[:20]}...")
-            temp_path = save_path.replace(".wav", ".mp3")
-            asyncio.run(asyncio.wait_for(
-                _edge_tts_generate(text, voice, rate, volume, temp_path),
-                timeout=15
-            ))
-            audio_cache.save_audio_cache(cache_key, temp_path, "edge_tts", "edge_tts", ext=".mp3", source_version=source_version)
-            if temp_path != save_path:
-                shutil.copy2(temp_path, save_path)
-                os.unlink(temp_path)
-            logger.info(f"Edge TTS完成: {file_name}")
-            return True, f"完成: {file_name}"
-        except asyncio.TimeoutError:
-            last_error = "超时"
-            logger.warning(f"Edge TTS超时 (尝试 {attempt}/{max_retries}): {file_name}")
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {e}")
-        if attempt < max_retries:
-            time.sleep(1)
+    # 占用全局并发额度（等待直到并发低于上限），整个片段（含重试）占用一个额度
+    _edge_acquire()
+    try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.debug(f"Edge TTS生成 (尝试 {attempt}/{max_retries}): 声音={voice}, 文本={text[:20]}...")
+                temp_path = save_path.replace(".wav", ".mp3")
+                asyncio.run(asyncio.wait_for(
+                    _edge_tts_generate(text, voice, rate, volume, temp_path),
+                    timeout=15
+                ))
+                audio_cache.save_audio_cache(cache_key, temp_path, "edge_tts", "edge_tts", ext=".mp3", source_version=source_version)
+                if temp_path != save_path:
+                    shutil.copy2(temp_path, save_path)
+                    os.unlink(temp_path)
+                logger.info(f"Edge TTS完成: {file_name}")
+                return True, f"完成: {file_name}"
+            except asyncio.TimeoutError:
+                last_error = "超时"
+                logger.warning(f"Edge TTS超时 (尝试 {attempt}/{max_retries}): {file_name}")
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {e}")
+            if attempt < max_retries:
+                time.sleep(1)
 
-    logger.error(f"Edge TTS失败 (已重试{max_retries}次): {file_name} - {last_error}")
-    return False, f"失败(已重试{max_retries}次): {last_error}"
+        logger.error(f"Edge TTS失败 (已重试{max_retries}次): {file_name} - {last_error}")
+        return False, f"失败(已重试{max_retries}次): {last_error}"
+    finally:
+        _edge_release()
