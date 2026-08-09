@@ -19,7 +19,7 @@
     "merge_max_duration_ms": 30000
   },
   "tts": {
-    "tts_mode": "api",
+    "tts_mode": "edge",
     "edge_voice": "zh-CN-XiaoxiaoNeural",
     "edge_rate": "+0%",
     "edge_volume": "+0%",
@@ -64,8 +64,8 @@
     "folder_prefix": true,
     "channel_map": {
       "left": 155,
-      "both": 135,
-      "right": 25
+      "right": 25,
+      "both": 135
     }
   }
 }

@@ -12,7 +12,7 @@ from PyQt6.QtGui import QIcon
 
 from .config import WorkflowConfig, SetupDialog
 from .task_manager import (
-    TaskQueue, TaskInfo,
+    TaskQueue, TaskInfo, TaskGroup,
     STEP_PENDING, STEP_RUNNING, STEP_DONE, STEP_FAILED, STEP_SKIPPED
 )
 from .widgets import StepPanel, TaskListWidget, TTSConfigPanel, MixerConfigPanel, WhisperConfigPanel
@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v1.4.0")
+        self.setWindowTitle("双语音声工作流 v1.5.0")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -42,6 +42,8 @@ class WorkflowMainWindow(QMainWindow):
         self._tts_total = 0
         # 批量执行器
         self._batch_executor = None
+        # 当前选中的文件夹组（选中组节点时非 None）
+        self._current_group: TaskGroup = None
 
         self._build_ui()
         self._connect_signals()
@@ -112,7 +114,7 @@ class WorkflowMainWindow(QMainWindow):
         self.task_list = TaskListWidget()
         self.task_list.set_task_queue(self.task_queue)
         left_layout.addWidget(self.task_list)
-        hint = QLabel("提示：可拖拽视频/音频文件或文件夹到此处")
+        hint = QLabel("提示：可拖拽视频/音频文件或文件夹到此处；文件夹将作为分组节点展示内部音频树")
         hint.setStyleSheet("color: gray; font-size: 11px;")
         left_layout.addWidget(hint)
         splitter.addWidget(left_group)
@@ -168,10 +170,15 @@ class WorkflowMainWindow(QMainWindow):
         self.task_list.task_selected.connect(self._on_task_selected)
         self.task_list.task_remove_requested.connect(self._on_task_remove)
         self.task_list.task_rerun_requested.connect(self._on_task_rerun)
+        self.task_list.group_selected.connect(self._on_group_selected)
+        self.task_list.group_remove_requested.connect(self._on_group_remove)
+        self.task_list.group_rerun_requested.connect(self._on_group_rerun)
         self.task_queue.task_added.connect(self.task_list.add_task_item)
         self.task_queue.task_removed.connect(self.task_list.remove_task_item)
         self.task_queue.task_updated.connect(self._on_task_updated)
         self.task_queue.current_changed.connect(self._on_current_changed)
+        self.task_queue.group_added.connect(self.task_list.add_group_item)
+        self.task_queue.group_removed.connect(self.task_list.remove_group_item)
 
     def _restore_task_list(self):
         """（已废弃）启动时任务列表为空，需手动添加文件。"""
@@ -226,41 +233,39 @@ class WorkflowMainWindow(QMainWindow):
         self._append_log(f"[配音] 已设置自定义配音目录: {os.path.basename(mix_folder)} (跳过步骤2)")
 
     def _scan_folder_for_tasks(self, folder: str):
-        """扫描文件夹，自动识别音频文件并匹配同名字幕，批量创建任务。
+        """扫描文件夹，创建一个文件夹任务组，组内每个音频文件一个子任务。
 
-        递归扫描文件夹，对每个找到的媒体文件：
-        - 使用 _find_matching_subtitle 查找同名字幕
-        - 创建新任务
+        递归扫描文件夹中的媒体文件，自动匹配同名字幕创建子任务，
+        文件夹以组节点形式保留在任务列表中，可展开查看音频树。
         """
         if not os.path.isdir(folder):
             self._append_log(f"[文件夹] 路径不存在: {folder}")
             return
 
         folder_name = os.path.basename(folder) or folder
-        self._append_log(f"[文件夹] 开始扫描: {folder_name}")
-
-        audio_files = []
-        for root, dirs, files in os.walk(folder):
-            for f in files:
-                ext = os.path.splitext(f)[1].lower()
-                if ext in VIDEO_EXTS:
-                    audio_files.append(os.path.join(root, f))
+        audio_files = TaskQueue.scan_folder_media(folder)
 
         if not audio_files:
-            self._append_log(f"[文件夹] 未找到支持的媒体文件")
+            self._append_log(f"[文件夹] 未找到支持的媒体文件: {folder_name}")
             return
 
-        self._append_log(f"[文件夹] 发现 {len(audio_files)} 个媒体文件")
+        # 创建文件夹任务组
+        group = self.task_queue.create_group(folder)
+        self._append_log(
+            f"[文件夹] 导入: {folder_name} (发现 {len(audio_files)} 个媒体文件)"
+        )
+
         for path in audio_files:
             sub_path = self._find_matching_subtitle(path)
-            task = self.task_queue.add_task(path, subtitle_path=sub_path)
-            task.from_folder = True
-            task.import_folder = os.path.abspath(folder)
+            task = self.task_queue.add_task(path, subtitle_path=sub_path,
+                                            group_id=group.group_id)
             self._append_log(f"[任务] 添加: {task.source_name}")
             if sub_path:
                 self._append_log(f"[任务]   ↳ 自动识别字幕: {os.path.basename(sub_path)}")
 
-        self._append_log(f"[文件夹] 完成: 共创建 {len(audio_files)} 个任务")
+        self._append_log(
+            f"[文件夹] 完成: 文件夹组「{group.group_name}」共 {len(group.tasks)} 个任务"
+        )
 
     def _find_matching_subtitle(self, media_path: str) -> str:
         """查找与媒体文件同目录、同名的字幕文件。
@@ -329,11 +334,18 @@ class WorkflowMainWindow(QMainWindow):
                     self._append_log(f"[拖拽] 跳过不支持的文件: {path}")
 
         # 视频/音频文件 → 创建新任务（自动查找同名字幕文件）
+        # 若当前选中文件夹组，则新任务加入该组
+        group_id = self._current_group.group_id if self._current_group else ""
         for path in video_files:
             # 自动查找同目录下的同名字幕文件
             sub_path = self._find_matching_subtitle(path)
-            task = self.task_queue.add_task(path, subtitle_path=sub_path)
+            task = self.task_queue.add_task(path, subtitle_path=sub_path,
+                                            group_id=group_id)
             self._append_log(f"[任务] 添加: {task.source_name}")
+            if group_id:
+                self._append_log(
+                    f"[任务] 已加入文件夹组: {self._current_group.group_name}"
+                )
             if sub_path:
                 self._append_log(f"[任务] 自动识别字幕: {os.path.basename(sub_path)} (跳过步骤1)")
 
@@ -348,7 +360,8 @@ class WorkflowMainWindow(QMainWindow):
                 # 没有当前任务，视为源音频文件
                 for path in wav_files:
                     sub_path = self._find_matching_subtitle(path)
-                    task = self.task_queue.add_task(path, subtitle_path=sub_path)
+                    task = self.task_queue.add_task(path, subtitle_path=sub_path,
+                                                    group_id=group_id)
                     self._append_log(f"[任务] 添加: {task.source_name}")
                     if sub_path:
                         self._append_log(f"[任务] 自动识别字幕: {os.path.basename(sub_path)} (跳过步骤1)")
@@ -567,13 +580,7 @@ class WorkflowMainWindow(QMainWindow):
             list(self.task_queue.tasks), steps, self.config,
             order=order, parent=self
         )
-        self._batch_executor.log_signal.connect(self._append_log)
-        self._batch_executor.progress_signal.connect(self._on_batch_progress)
-        self._batch_executor.step_progress_signal.connect(self._on_step_progress)
-        self._batch_executor.step_total_signal.connect(self._on_step_total)
-        self._batch_executor.task_started.connect(self._on_batch_task_started)
-        self._batch_executor.task_finished.connect(self._on_batch_task_finished)
-        self._batch_executor.finished_signal.connect(self._on_batch_finished)
+        self._connect_batch_signals()
 
         self.batch_btn.setEnabled(False)
         self.batch_stop_btn.setEnabled(True)
@@ -583,6 +590,16 @@ class WorkflowMainWindow(QMainWindow):
 
         self._append_log(f"[批量] 开始执行 {len(self.task_queue.tasks)} 个任务，步骤 {steps}")
         self._batch_executor.start()
+
+    def _connect_batch_signals(self):
+        """连接批量执行器的全部信号到主窗口槽（批量/组执行共用）。"""
+        self._batch_executor.log_signal.connect(self._append_log)
+        self._batch_executor.progress_signal.connect(self._on_batch_progress)
+        self._batch_executor.step_progress_signal.connect(self._on_step_progress)
+        self._batch_executor.step_total_signal.connect(self._on_step_total)
+        self._batch_executor.task_started.connect(self._on_batch_task_started)
+        self._batch_executor.task_finished.connect(self._on_batch_task_finished)
+        self._batch_executor.finished_signal.connect(self._on_batch_finished)
 
     def _on_batch_stop(self):
         if self._batch_executor:
@@ -594,11 +611,8 @@ class WorkflowMainWindow(QMainWindow):
             self.status_bar_label.setText(f"批量: 任务 {task_idx + 1}/{total}")
         else:
             self.status_bar_label.setText(f"批量: 任务 {task_idx + 1}/{total} 步骤{step}")
-            # 步骤开始时重置对应步骤面板的进度条，避免残留上一个任务的进度
-            panel = self.step_panels.get(step)
-            if panel:
-                panel.progress.setRange(0, 100)
-                panel.progress.setValue(0)
+            # 步骤进度条由 step_progress_signal 驱动（任务内进度 / 任务间累计进度），
+            # 不再在每任务开始时重置为 0，避免累计进度被清零
 
     def _on_batch_task_started(self, task_id: str):
         task = self.task_queue.get_task(task_id)
@@ -617,9 +631,11 @@ class WorkflowMainWindow(QMainWindow):
         self._batch_executor = None
         self.batch_btn.setEnabled(True)
         self.batch_stop_btn.setEnabled(False)
-        # 恢复步骤面板按钮状态
+        # 恢复步骤面板按钮状态（任务或文件夹组模式）
         if self.task_queue.current:
             self._refresh_step_panels(self.task_queue.current)
+        elif self._current_group:
+            self._show_group_summary(self._current_group)
         self.status_bar_label.setText("就绪")
         # 批量完成后，统一重命名文件夹导入的源文件夹
         if self.config.mixer_cfg.get("folder_prefix", True):
@@ -669,14 +685,56 @@ class WorkflowMainWindow(QMainWindow):
 
     # ========== 任务选择 ==========
     def _on_task_selected(self, task_id: str):
+        self._current_group = None
         self.task_queue.set_current(task_id)
+
+    def _on_group_selected(self, group_id: str):
+        """选中文件夹组节点：右侧显示组汇总，步骤执行作用于组内全部任务。"""
+        group = self.task_queue.get_group(group_id)
+        if not group:
+            return
+        self._current_group = group
+        self.task_queue.set_current(None)
+
+    def _show_group_summary(self, group: TaskGroup):
+        """在右侧面板显示文件夹组的汇总状态。"""
+        done = group.done_count()
+        total = len(group.tasks)
+        self.current_task_label.setText(
+            f"文件夹：{group.group_name}　({done}/{total} 完成 · {total} 个音频)"
+        )
+        for step in (1, 2, 3):
+            panel = self.step_panels[step]
+            status = self._group_step_status(group, step)
+            panel.set_status(status)
+            panel.set_output("")
+            panel.progress.setRange(0, 100)
+            panel.progress.setValue(int(group.progress() * 100))
+            panel.start_btn.setEnabled(True)
+            panel.stop_btn.setEnabled(False)
+
+    @staticmethod
+    def _group_step_status(group: TaskGroup, step: int) -> str:
+        """组内某步骤的汇总状态：running > failed > done > pending。"""
+        statuses = [t.step_status(step) for t in group.tasks]
+        if any(s == STEP_RUNNING for s in statuses):
+            return STEP_RUNNING
+        if any(s == STEP_FAILED for s in statuses):
+            return STEP_FAILED
+        if statuses and all(s in (STEP_DONE, STEP_SKIPPED) for s in statuses):
+            return STEP_DONE
+        return STEP_PENDING
 
     def _on_current_changed(self, task: TaskInfo):
         if task is None:
+            if self._current_group:
+                self._show_group_summary(self._current_group)
+                return
             self.current_task_label.setText("未选择任务")
             for panel in self.step_panels.values():
                 panel.reset()
             return
+        self._current_group = None
         self.current_task_label.setText(
             f"当前任务：{task.source_name}  (创建于 {task.created_at})"
         )
@@ -686,6 +744,10 @@ class WorkflowMainWindow(QMainWindow):
         self.task_list.update_task_item(task)
         if self.task_queue.current and self.task_queue.current.task_id == task.task_id:
             self._refresh_step_panels(task)
+        elif (self._current_group and not self._batch_executor
+              and task.group_id == self._current_group.group_id):
+            # 组内任务状态变化时刷新组汇总（批量执行中不刷新，避免干扰进度显示）
+            self._show_group_summary(self._current_group)
 
     def _refresh_step_panels(self, task: TaskInfo):
         """根据任务状态刷新三个步骤面板。"""
@@ -699,6 +761,17 @@ class WorkflowMainWindow(QMainWindow):
             )
             panel.set_output(output or "")
 
+            # 进度条按步骤状态重置，避免残留上一次运行的值：
+            # 完成/跳过 → 100%；待处理/失败 → 0%；运行中 → 保持实时进度（由进度信号驱动）
+            if status == STEP_RUNNING:
+                pass
+            elif status in (STEP_DONE, STEP_SKIPPED):
+                panel.progress.setRange(0, 100)
+                panel.progress.setValue(100)
+            else:
+                panel.progress.setRange(0, 100)
+                panel.progress.setValue(0)
+
             # 按钮可用性
             running = (status == STEP_RUNNING)
             skipped = (status == STEP_SKIPPED)
@@ -710,6 +783,10 @@ class WorkflowMainWindow(QMainWindow):
 
     # ========== 步骤执行 ==========
     def _on_start_step(self, step: int):
+        # 组模式：对组内所有任务逐个执行该步骤
+        if self._current_group:
+            self._start_group_step(self._current_group, step)
+            return
         task = self.task_queue.current
         if not task:
             QMessageBox.warning(self, "提示", "请先选择一个任务。")
@@ -745,6 +822,9 @@ class WorkflowMainWindow(QMainWindow):
         task.set_step_error(step, "")
         self.step_panels[step].set_running(True)
         self.step_panels[step].set_status(STEP_RUNNING)
+        # 启动前重置该步骤进度条（TTS 的 total 信号会随后调整上限）
+        self.step_panels[step].progress.setRange(0, 100)
+        self.step_panels[step].progress.setValue(0)
         self._refresh_step_panels(task)
         worker.start()
 
@@ -753,6 +833,45 @@ class WorkflowMainWindow(QMainWindow):
         if worker:
             worker.stop()
             self._append_log(f"[步骤{step}] 正在停止...")
+
+    def _start_group_step(self, group: TaskGroup, step: int):
+        """对文件夹组内所有任务逐个执行指定步骤（复用批量执行器）。"""
+        if self._batch_executor:
+            QMessageBox.warning(self, "提示", "已有批量执行正在进行中，请先停止。")
+            return
+        if not group.tasks:
+            QMessageBox.information(self, "提示", "该文件夹组没有任务。")
+            return
+        pending = [t for t in group.tasks
+                   if t.step_status(step) not in (STEP_DONE, STEP_SKIPPED)]
+        if not pending:
+            QMessageBox.information(
+                self, "提示", f"组内所有任务的步骤{step} 均已完成或已跳过。"
+            )
+            return
+        not_ready = [t.source_name for t in pending if not t.is_step_ready(step)]
+        if not_ready:
+            QMessageBox.warning(
+                self, "提示",
+                f"以下任务步骤 {step} 前置未完成，无法执行：\n"
+                + "\n".join(not_ready[:10])
+            )
+            return
+
+        from .steps.batch_executor import BatchExecutor
+        self._batch_executor = BatchExecutor(
+            list(group.tasks), [step], self.config, order="by_task", parent=self
+        )
+        self._connect_batch_signals()
+        self.batch_btn.setEnabled(False)
+        self.batch_stop_btn.setEnabled(True)
+        for panel in self.step_panels.values():
+            panel.start_btn.setEnabled(False)
+        self._append_log(
+            f"[文件夹] 开始逐个执行: 「{group.group_name}」步骤{step} "
+            f"({len(group.tasks)} 个任务)"
+        )
+        self._batch_executor.start()
 
     def _on_tts_total(self, total: int):
         self._tts_total = total
@@ -944,6 +1063,49 @@ class WorkflowMainWindow(QMainWindow):
         self._refresh_step_panels(task)
         # 启动
         self._on_start_step(step)
+
+    def _on_group_remove(self, group_id: str):
+        group = self.task_queue.get_group(group_id)
+        if not group:
+            return
+        reply = QMessageBox.question(
+            self, "移除文件夹组",
+            f"确定移除文件夹组「{group.group_name}」及其 {len(group.tasks)} 个任务？\n"
+            "（不会删除已生成的文件）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.task_queue.remove_group(group_id)
+            if self._current_group and self._current_group.group_id == group_id:
+                self._current_group = None
+            self._append_log(
+                f"[文件夹] 已移除组: {group.group_name} ({len(group.tasks)} 个任务)"
+            )
+
+    def _on_group_rerun(self, group_id: str, step: int):
+        """重跑组内所有任务的某一步（重置状态后逐个执行）。"""
+        group = self.task_queue.get_group(group_id)
+        if not group:
+            return
+        if self._batch_executor:
+            QMessageBox.warning(self, "提示", "已有批量执行正在进行中。")
+            return
+        self._current_group = group
+        for task in group.tasks:
+            task.set_step_status(step, STEP_PENDING)
+            task.set_step_error(step, "")
+            task.set_step_output(step, "")
+            # 重跑前置步骤时，后续步骤一并重置
+            if step == 1:
+                task.set_step_status(2, STEP_PENDING)
+                task.set_step_output(2, "")
+                task.set_step_status(3, STEP_PENDING)
+                task.set_step_output(3, "")
+            elif step == 2:
+                task.set_step_status(3, STEP_PENDING)
+                task.set_step_output(3, "")
+            self.task_queue.update_task(task)
+        self._start_group_step(group, step)
 
     # ========== 日志 ==========
     def _append_log(self, msg: str):

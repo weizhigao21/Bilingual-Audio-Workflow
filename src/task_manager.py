@@ -60,6 +60,7 @@ class TaskInfo:
 
     from_folder: bool = False           # 是否来自文件夹导入（用于混音输出前缀判断）
     import_folder: str = ""             # 拖入的原始文件夹路径（用于完成后的重命名）
+    group_id: str = ""                  # 所属文件夹任务组 ID（空=散任务）
 
     def __post_init__(self):
         if not self.created_at:
@@ -222,6 +223,48 @@ class TaskInfo:
         return (scores[self.step1_status] + scores[self.step2_status] + scores[self.step3_status]) / 3.0
 
 
+@dataclass
+class TaskGroup:
+    """文件夹任务组：包含一个文件夹内扫描出的多个音频任务。
+
+    组节点只作为组织与汇总容器，真正执行时遍历其 tasks 逐个处理。
+    """
+    group_id: str                       # 唯一 ID
+    group_name: str                     # 文件夹名
+    folder_path: str                    # 文件夹绝对路径
+    tasks: list = field(default_factory=list)   # List[TaskInfo]
+
+    def add_task(self, task: TaskInfo):
+        self.tasks.append(task)
+
+    def remove_task(self, task_id: str):
+        for i, t in enumerate(self.tasks):
+            if t.task_id == task_id:
+                self.tasks.pop(i)
+                break
+
+    def progress(self) -> float:
+        """组整体进度 0~1（子任务整体进度的平均）。"""
+        if not self.tasks:
+            return 0.0
+        return sum(t.overall_progress() for t in self.tasks) / len(self.tasks)
+
+    def done_count(self) -> int:
+        """已完成混音的子任务数。"""
+        return sum(1 for t in self.tasks if t.step3_status == STEP_DONE)
+
+    def overall_status(self) -> str:
+        if not self.tasks:
+            return STEP_PENDING
+        if any(t.step_status(s) == STEP_RUNNING for t in self.tasks for s in (1, 2, 3)):
+            return STEP_RUNNING
+        if all(t.step3_status == STEP_DONE for t in self.tasks):
+            return STEP_DONE
+        if any(t.step_status(s) == STEP_FAILED for t in self.tasks for s in (1, 2, 3)):
+            return STEP_FAILED
+        return STEP_PENDING
+
+
 def _sanitize_name(name: str) -> str:
     """清理文件名中的非法字符。"""
     return re.sub(r'[\\/:*?"<>|]', "_", name).strip()
@@ -273,18 +316,36 @@ class TaskQueue(QObject):
     task_removed = pyqtSignal(str)        # task_id
     task_updated = pyqtSignal(object)     # TaskInfo
     current_changed = pyqtSignal(object)  # 当前选中任务（可能为 None）
+    group_added = pyqtSignal(object)      # TaskGroup
+    group_removed = pyqtSignal(str)       # group_id
+
+    # 源媒体文件扩展名（与 GUI 保持一致）
+    VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts",
+                  ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
 
     def __init__(self, workspace_root: str):
         super().__init__()
         self.workspace_root = workspace_root
-        self.tasks: list = []
+        self.tasks: list = []            # 所有叶子任务（散任务 + 组内任务，扁平）
+        self.groups: list = []           # List[TaskGroup]
         self._current: Optional[TaskInfo] = None
 
     def add_task(self, source_path: str,
-                 subtitle_path: str = "", mix_folder: str = "") -> TaskInfo:
-        """添加新任务，按 source_name 插入到正确位置保持列表有序。"""
+                 subtitle_path: str = "", mix_folder: str = "",
+                 group_id: str = "") -> TaskInfo:
+        """添加新任务，按 source_name 插入到正确位置保持列表有序。
+
+        group_id 非空时任务加入对应文件夹组，并自动标记 from_folder。
+        """
         task = create_task(self.workspace_root, source_path,
                            subtitle_path=subtitle_path, mix_folder=mix_folder)
+        if group_id:
+            group = self.get_group(group_id)
+            if group:
+                task.group_id = group_id
+                task.from_folder = True
+                task.import_folder = group.folder_path
+                group.add_task(task)
         # 按 source_name 自然顺序找到插入位置
         new_key = _natural_key(task.source_name)
         insert_idx = 0
@@ -296,6 +357,45 @@ class TaskQueue(QObject):
         self.tasks.insert(insert_idx, task)
         self.task_added.emit(task)
         return task
+
+    # ---------- 文件夹组管理 ----------
+    @staticmethod
+    def scan_folder_media(folder: str) -> list:
+        """递归扫描文件夹中的媒体文件，返回绝对路径列表（自然排序）。"""
+        media = []
+        for root, dirs, files in os.walk(folder):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in TaskQueue.VIDEO_EXTS:
+                    media.append(os.path.join(root, f))
+        return sorted(media, key=_natural_key)
+
+    def create_group(self, folder_path: str) -> TaskGroup:
+        """创建文件夹任务组（不含任务），并通知界面。"""
+        folder_path = os.path.abspath(folder_path)
+        group = TaskGroup(
+            group_id=f"grp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(self.groups)}",
+            group_name=os.path.basename(folder_path) or folder_path,
+            folder_path=folder_path,
+        )
+        self.groups.append(group)
+        self.group_added.emit(group)
+        return group
+
+    def get_group(self, group_id: str) -> Optional[TaskGroup]:
+        for g in self.groups:
+            if g.group_id == group_id:
+                return g
+        return None
+
+    def remove_group(self, group_id: str):
+        """移除文件夹组及其全部子任务（仅列表，不删目录）。"""
+        group = self.get_group(group_id)
+        if not group:
+            return
+        for t in list(group.tasks):
+            self.remove_task(t.task_id)
+        self.groups.remove(group)
+        self.group_removed.emit(group_id)
 
     def set_task_custom_subtitle(self, task_id: str, subtitle_path: str):
         """为已有任务设置/更新自定义字幕（跳过步骤1）。"""
@@ -337,6 +437,11 @@ class TaskQueue(QObject):
         for i, t in enumerate(self.tasks):
             if t.task_id == task_id:
                 self.tasks.pop(i)
+                # 同步从所属文件夹组移除
+                if t.group_id:
+                    group = self.get_group(t.group_id)
+                    if group:
+                        group.remove_task(task_id)
                 self.task_removed.emit(task_id)
                 if self._current and self._current.task_id == task_id:
                     self._current = self.tasks[0] if self.tasks else None
@@ -346,10 +451,14 @@ class TaskQueue(QObject):
     def clear_all(self, delete_files: bool = False):
         """清空所有任务。"""
         removed_ids = [t.task_id for t in self.tasks]
+        removed_group_ids = [g.group_id for g in self.groups]
         self.tasks.clear()
+        self.groups.clear()
         self._current = None
         for tid in removed_ids:
             self.task_removed.emit(tid)
+        for gid in removed_group_ids:
+            self.group_removed.emit(gid)
         self.current_changed.emit(None)
 
     def get_task(self, task_id: str) -> Optional[TaskInfo]:

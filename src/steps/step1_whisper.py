@@ -55,14 +55,9 @@ class WhisperWorker(QThread):
         source_path = self.task.source_path
         # 字幕最终会出现在源文件所在目录
         search_dir = os.path.dirname(source_path)
-        # 文件夹导入的任务直接传文件夹（infer.exe 会自动扫描其中的音频），
-        # 单独添加的文件则传文件本身
-        if self.task.from_folder and self.task.import_folder:
-            input_path = self.task.import_folder
-            output_dir = ""  # 文件夹模式不指定输出目录，字幕输出到各音频所在目录
-        else:
-            input_path = source_path
-            output_dir = search_dir
+        # 每个任务独立识别自己的源文件（文件夹组的子任务同样按文件处理）
+        input_path = source_path
+        output_dir = search_dir
 
         # 构建命令行
         cmd = [
@@ -175,9 +170,8 @@ class WhisperWorker(QThread):
                 found_sub = expected
                 break
 
-        # 如果精确名没找到，扫描目录里第一个匹配的（仅单独文件模式；
-        # 文件夹模式下目录中可能混入其它文件的字幕，避免误匹配）
-        if not found_sub and not (self.task.from_folder and self.task.import_folder):
+        # 如果精确名没找到，扫描目录里第一个匹配的
+        if not found_sub:
             for f in os.listdir(search_dir):
                 for fmt in sub_formats:
                     if f.endswith(f".{fmt.strip()}"):

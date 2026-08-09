@@ -110,7 +110,9 @@ class BatchExecutor(QThread):
                 self.log_signal.emit(f"[批量] 执行步骤{step}...")
                 self.progress_signal.emit(i, total, step)
 
-                ok, msg = self._run_single_step(task, step)
+                ok, msg = self._run_single_step(task, step, i, total)
+                # 推进该步骤的任务间累计进度（即使失败也推进，避免卡住）
+                self.step_progress_signal.emit(step, int((i + 1) * 100 / total))
                 if ok:
                     self.log_signal.emit(f"[批量] 步骤{step} 完成: {msg}")
                 else:
@@ -178,7 +180,9 @@ class BatchExecutor(QThread):
                 self.task_started.emit(task.task_id)
                 self.progress_signal.emit(i, total, step)
 
-                ok, msg = self._run_single_step(task, step)
+                ok, msg = self._run_single_step(task, step, i, total)
+                # 推进该步骤的任务间累计进度
+                self.step_progress_signal.emit(step, int((i + 1) * 100 / total))
                 if ok:
                     self.log_signal.emit(f"[批量] [{task.source_name}] 步骤{step} 完成: {msg}")
                 else:
@@ -354,8 +358,14 @@ class BatchExecutor(QThread):
         self.step_progress_signal.emit(3, 100)
         self.log_signal.emit(f"[批量] 步骤3 并行批量完成")
 
-    def _run_single_step(self, task: TaskInfo, step: int):
-        """执行单个任务的单个步骤，返回 (success, output_or_error)。"""
+    def _run_single_step(self, task: TaskInfo, step: int,
+                         task_index: int = 0, total: int = 1):
+        """执行单个任务的单个步骤，返回 (success, output_or_error)。
+
+        task_index/total 用于把任务内进度(0-100)映射到任务间累计进度，
+        使批量/组执行时步骤进度条按"已完成任务数/总任务数"递增。
+        （步骤2 TTS 保持片段级进度，不参与映射）
+        """
         worker = self._create_worker(task, step)
         if not worker:
             return False, "无法创建 worker"
@@ -369,10 +379,17 @@ class BatchExecutor(QThread):
             loop.quit()
 
         worker.log_signal.connect(self.log_signal.emit)
-        # 转发步骤内进度到 step_progress_signal，更新对应步骤面板的进度条
-        worker.progress_signal.connect(
-            lambda v, s=step: self.step_progress_signal.emit(s, v)
-        )
+
+        def on_progress(v):
+            # 单任务直接显示任务内进度；多任务时映射到累计区间
+            if step == 2 or total <= 1:
+                self.step_progress_signal.emit(step, v)
+            else:
+                base = task_index / total
+                mapped = int((base + (v / 100.0) / total) * 100)
+                self.step_progress_signal.emit(step, max(0, min(100, mapped)))
+
+        worker.progress_signal.connect(on_progress)
         # TTS 步骤有 total_signal，转发以设置进度条上限
         if hasattr(worker, 'total_signal'):
             worker.total_signal.connect(
