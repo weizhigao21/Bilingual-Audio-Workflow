@@ -202,6 +202,11 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
 
         # 6. 导出
         _log("[音频混音] 导出中...")
+        # 导出音频质量参数
+        bitrate = cfg.get("audio_bitrate", "192k")
+        sample_rate = int(cfg.get("audio_sample_rate", 44100))
+        channels = int(cfg.get("audio_channels", 2))
+        wav_bit_depth = int(cfg.get("wav_bit_depth", 16))
         if is_video:
             # 视频模式：导出临时 wav → 替换视频音轨
             temp_mixed = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -210,6 +215,8 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                 original_audio.export(temp_mixed.name, format="wav")
                 replace_audio_in_video(
                     original_path, temp_mixed.name, final_output,
+                    bitrate=bitrate, sample_rate=sample_rate,
+                    channels=channels,
                     stop_check=stop_check,
                 )
             finally:
@@ -223,18 +230,27 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
             if use_gpu:
                 export_with_nvenc(
                     original_audio, final_output, output_format,
+                    bitrate=bitrate, sample_rate=sample_rate,
+                    channels=channels,
                     stop_check=stop_check,
                 )
             else:
                 export_params = {}
                 if output_format == "mp3":
-                    export_params = {"format": "mp3", "bitrate": "192k"}
+                    export_params = {"format": "mp3", "bitrate": bitrate}
                 elif output_format == "ogg":
                     export_params = {"format": "ogg"}
                 elif output_format == "m4a":
                     export_params = {"format": "ipod"}
+                elif output_format == "wav":
+                    export_params = {"format": "wav", "bit_depth": wav_bit_depth}
                 else:
                     export_params = {"format": output_format}
+                # 采样率/声道与目标不一致时先转换
+                if original_audio.frame_rate != sample_rate:
+                    original_audio = original_audio.set_frame_rate(sample_rate)
+                if original_audio.channels != channels:
+                    original_audio = original_audio.set_channels(channels)
                 original_audio.export(final_output, **export_params)
 
         _cleanup(temp_audio_path)

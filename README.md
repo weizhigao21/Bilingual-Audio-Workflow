@@ -1,4 +1,4 @@
-# 双语音声工作流 v1.3.0
+# 双语音声工作流 v1.4.0
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
@@ -78,6 +78,12 @@ pip install PyQt6 pydub numpy edge-tts requests
 
 | 参数 | 说明 |
 |---|---|
+| 导出格式 | MP4（视频，H.264）/ MP3 / M4A（AAC）/ WAV（无损）/ AAC |
+| 音频质量 | 档位预设：低（128k/44.1kHz）/ 标准（192k/44.1kHz）/ 高（256k/44.1kHz）/ 极致（320k/48kHz）/ 自定义 |
+| 比特率 | 128k / 192k / 256k / 320k（自定义档位时可选） |
+| 采样率 | 44100 Hz / 48000 Hz（自定义档位时可选） |
+| 声道 | 立体声 / 单声道（自定义档位时可选） |
+| WAV 位深 | 16 / 24 / 32 bit（仅 WAV 导出生效） |
 | 音量 | 配音相对原音频的音量偏移（dB） |
 | 自动音量 | fixed（匹配原音频 RMS 响度）/ auto（逐帧动态匹配）/ off（纯固定增益） |
 | 声道检测 | 自动检测配音在原音频中的方位（左/中/右） |
@@ -141,6 +147,12 @@ TTS 合成结果基于 **文本内容 + 声音模型** 进行 MD5 去重缓存�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v1.4.0 (2026-08-09)
+- 混音配置新增"导出音频质量"：档位预设（低/标准/高/极致/自定义）+ 比特率（128k~320k）、采样率（44.1kHz/48kHz）、声道（立体声/单声道）可调，WAV 导出支持 16/24/32bit 位深
+- 导出参数从硬编码 192k/44.1kHz/2ch 提升为可配置项，覆盖纯音频导出（pydub/NVENC）与视频换音轨两条路径
+- 批量 API 请求增加异常兜底，服务器未返回音频时正确标记失败而非漏报
+- 新增 API 服务器连通性测试函数 `test_api_server`
 
 ### v1.3.0 (2026-08-03)
 - 步骤1 字幕提取支持文件夹模式：文件夹导入的任务直接传文件夹给 infer.exe，自动扫描其中全部音频，避免逐个文件处理；批量模式同样改为传去重后的文件夹列表，显著提升处理速度

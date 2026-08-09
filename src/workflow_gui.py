@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v1.3.0")
+        self.setWindowTitle("双语音声工作流 v1.4.0")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -417,6 +417,7 @@ class WorkflowMainWindow(QMainWindow):
         dlg_layout = QVBoxLayout(dialog)
         panel = TTSConfigPanel(self.config, dialog)
         panel.config_changed.connect(self._on_tts_config_changed)
+        panel.log_message.connect(self._append_log)
         dlg_layout.addWidget(panel)
         # 关闭按钮
         btn_row = QHBoxLayout()

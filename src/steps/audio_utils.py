@@ -691,9 +691,14 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
         return result
 
 
-def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=None):
+def export_with_nvenc(audio_segment, output_path, format_type="mp3",
+                      bitrate="192k", sample_rate=44100, channels=2,
+                      stop_check=None):
     temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     temp_wav.close()
+
+    ar_arg = str(sample_rate)
+    ac_arg = str(channels)
 
     try:
         audio_segment.export(temp_wav.name, format="wav")
@@ -703,9 +708,9 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", temp_wav.name,
                 "-c:a", "libmp3lame",
-                "-b:a", "192k",
-                "-ar", "44100",
-                "-ac", "2",
+                "-b:a", bitrate,
+                "-ar", ar_arg,
+                "-ac", ac_arg,
                 output_path
             ]
         elif format_type in ("aac", "m4a"):
@@ -714,9 +719,9 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-i", temp_wav.name,
                     "-c:a", "aac_nvenc",
-                    "-b:a", "192k",
-                    "-ar", "44100",
-                    "-ac", "2",
+                    "-b:a", bitrate,
+                    "-ar", ar_arg,
+                    "-ac", ac_arg,
                     output_path
                 ]
             else:
@@ -724,9 +729,9 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-i", temp_wav.name,
                     "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-ar", "44100",
-                    "-ac", "2",
+                    "-b:a", bitrate,
+                    "-ar", ar_arg,
+                    "-ac", ac_arg,
                     output_path
                 ]
         elif format_type in ("hevc", "h265"):
@@ -734,7 +739,9 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", temp_wav.name,
                 "-c:a", "aac",
-                "-b:a", "192k",
+                "-b:a", bitrate,
+                "-ar", ar_arg,
+                "-ac", ac_arg,
                 "-tag:v", "hvc1",
                 output_path
             ]
@@ -743,6 +750,8 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3", stop_check=
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", temp_wav.name,
                 "-acodec", "pcm_s16le",
+                "-ar", ar_arg,
+                "-ac", ac_arg,
                 output_path
             ]
 
@@ -776,13 +785,16 @@ def extract_audio_from_video(video_path, stop_check=None):
     return temp_wav.name
 
 
-def replace_audio_in_video(video_path, audio_path, output_path, stop_check=None):
+def replace_audio_in_video(video_path, audio_path, output_path,
+                           bitrate="192k", sample_rate=44100, channels=2,
+                           stop_check=None):
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", video_path,
         "-i", audio_path,
         "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", bitrate,
+        "-ar", str(sample_rate), "-ac", str(channels),
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest",
         output_path

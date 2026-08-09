@@ -418,12 +418,6 @@ class TTSWorker(QThread):
         bulk_batch_size = self.config.get("bulk_batch_size", 5)
 
         available_apis = self._get_available_apis()
-        if self.config.get("use_multi_api", False):
-            self.log_signal.emit(
-                f"使用多API模式，共 {len(available_apis)} 个在线API"
-            )
-        else:
-            self.log_signal.emit("使用单API模式")
 
         if not available_apis:
             self.log_signal.emit("错误：没有可用的API配置")
@@ -496,13 +490,20 @@ class TTSWorker(QThread):
                         break
 
                     if use_bulk and len(batch) > 1:
-                        results = tts_bulk_task(
-                            batch,
-                            api_config["url"],
-                            api_config["model"],
-                            self.audio_cache,
-                        )
-                        for i, (success, msg) in enumerate(results):
+                        try:
+                            results = tts_bulk_task(
+                                batch,
+                                api_config["url"],
+                                api_config["model"],
+                                self.audio_cache,
+                            )
+                        except Exception as e:
+                            results = [(False, f"批量异常: {e}") for _ in batch]
+                        for result in results:
+                            if result is None:
+                                success, msg = False, "服务器未返回音频"
+                            else:
+                                success, msg = result
                             self.log_signal.emit(f"[{api_config['name']}] {msg}")
                     else:
                         for task in batch:

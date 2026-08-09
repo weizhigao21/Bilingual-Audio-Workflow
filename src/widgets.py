@@ -285,6 +285,7 @@ class TTSConfigPanel(QGroupBox):
     修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
     """
     config_changed = pyqtSignal()
+    log_message = pyqtSignal(str)
 
     def __init__(self, config, parent=None):
         super().__init__("TTS 配置")
@@ -351,6 +352,11 @@ class TTSConfigPanel(QGroupBox):
         edit_api_btn = QPushButton("编辑API列表...")
         edit_api_btn.clicked.connect(self._on_edit_apis)
         api_layout.addWidget(edit_api_btn, 0, 2)
+
+        test_api_btn = QPushButton("测试全部")
+        test_api_btn.setToolTip("测试所有 API 服务器是否可用，并刷新其状态")
+        test_api_btn.clicked.connect(self._on_test_all_apis)
+        api_layout.addWidget(test_api_btn, 0, 3)
 
         api_layout.addWidget(QLabel("批量大小:"), 1, 0)
         self.bulk_spin = QSpinBox()
@@ -443,9 +449,35 @@ class TTSConfigPanel(QGroupBox):
 
     def _on_edit_apis(self):
         dialog = ApiConfigDialog(self.config, self)
+        dialog.log_message.connect(self.log_message.emit)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._refresh_api_combo()
             self._save()
+
+    def _on_test_all_apis(self):
+        """测试所有 API 服务器，逐个刷新状态并写入日志。"""
+        from PyQt6.QtWidgets import QMessageBox
+        from .steps.tts_utils import test_api_server
+        apis = self.config.tts_cfg.get("api_configs", [])
+        if not apis:
+            QMessageBox.warning(self, "提示", "请先在“编辑API列表”中添加服务器。")
+            return
+        ok_count = 0
+        for api in apis:
+            url = api.get("url", "")
+            ok, msg = test_api_server(url)
+            api["status"] = "success" if ok else "failed"
+            status_text = "✓ 可用" if ok else "✗ 不可用"
+            self.log_message.emit(
+                f"[API测试] {api.get('name', '?')} ({url}) -> {status_text} ({msg})"
+            )
+            if ok:
+                ok_count += 1
+        self.config.save()
+        QMessageBox.information(
+            self, "测试完成",
+            f"共 {len(apis)} 个服务器，可用 {ok_count} 个",
+        )
 
     def _save(self):
         cfg = self.config.tts_cfg
@@ -503,6 +535,8 @@ class TTSConfigPanel(QGroupBox):
 class ApiConfigDialog(QDialog):
     """API 服务器列表编辑对话框。"""
 
+    log_message = pyqtSignal(str)
+
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
@@ -531,6 +565,10 @@ class ApiConfigDialog(QDialog):
         del_btn = QPushButton("- 删除")
         del_btn.clicked.connect(self._on_delete)
         btn_row.addWidget(del_btn)
+        test_all_btn = QPushButton("测试全部")
+        test_all_btn.setToolTip("逐个测试所有 API 服务器并刷新状态列")
+        test_all_btn.clicked.connect(self._on_test_all)
+        btn_row.addWidget(test_all_btn)
         btn_row.addStretch()
         ok_btn = QPushButton("确定")
         ok_btn.clicked.connect(self._on_accept)
@@ -559,6 +597,23 @@ class ApiConfigDialog(QDialog):
             self._apis.pop(row)
             self._refresh_table()
 
+    def _on_test_all(self):
+        """逐个测试所有 API 服务器并更新状态列。"""
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from .steps.tts_utils import test_api_server
+        for i, api in enumerate(self._apis):
+            url = api.get("url", "")
+            self.table.setItem(i, 3, QTableWidgetItem("测试中..."))
+            ok, msg = test_api_server(url)
+            api["status"] = "success" if ok else "failed"
+            self.table.setItem(i, 3, QTableWidgetItem(api["status"]))
+            status_text = "✓ 可用" if ok else "✗ 不可用"
+            self.log_message.emit(
+                f"[API测试] {api.get('name', '?')} ({url}) -> {status_text} ({msg})"
+            )
+            QApplication.processEvents()
+        QMessageBox.information(self, "测试完成", "所有 API 服务器测试完成，状态已更新。")
+
     def _on_accept(self):
         # 从表格收集数据
         for i in range(self.table.rowCount()):
@@ -584,6 +639,14 @@ class MixerConfigPanel(QGroupBox):
     修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
     """
     config_changed = pyqtSignal()
+
+    # 质量档位 → (比特率, 采样率, 声道数)
+    PRESET_PARAMS = {
+        "low": ("128k", 44100, 2),
+        "standard": ("192k", 44100, 2),
+        "high": ("256k", 44100, 2),
+        "extreme": ("320k", 48000, 2),
+    }
 
     def __init__(self, config, parent=None):
         super().__init__("混音配置")
@@ -616,6 +679,41 @@ class MixerConfigPanel(QGroupBox):
         self.format_combo.addItem("AAC（音频）", "aac")
         self.format_combo.currentIndexChanged.connect(self._save)
         layout.addRow("导出格式:", self.format_combo)
+
+        # 导出音频质量（档位预设）
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("标准（192k / 44.1kHz）", "standard")
+        self.preset_combo.addItem("低（128k / 44.1kHz）", "low")
+        self.preset_combo.addItem("高（256k / 44.1kHz）", "high")
+        self.preset_combo.addItem("极致（320k / 48kHz）", "extreme")
+        self.preset_combo.addItem("自定义", "custom")
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        layout.addRow("音频质量:", self.preset_combo)
+
+        # 高级参数（选"自定义"或手动改动时启用）
+        self.bitrate_combo = QComboBox()
+        for b in ("128k", "192k", "256k", "320k"):
+            self.bitrate_combo.addItem(b, b)
+        self.bitrate_combo.currentIndexChanged.connect(self._on_quality_param_changed)
+        layout.addRow("比特率:", self.bitrate_combo)
+
+        self.sr_combo = QComboBox()
+        self.sr_combo.addItem("44100 Hz", 44100)
+        self.sr_combo.addItem("48000 Hz", 48000)
+        self.sr_combo.currentIndexChanged.connect(self._on_quality_param_changed)
+        layout.addRow("采样率:", self.sr_combo)
+
+        self.channels_combo = QComboBox()
+        self.channels_combo.addItem("立体声（2 声道）", 2)
+        self.channels_combo.addItem("单声道（1 声道）", 1)
+        self.channels_combo.currentIndexChanged.connect(self._on_quality_param_changed)
+        layout.addRow("声道:", self.channels_combo)
+
+        self.depth_combo = QComboBox()
+        for d in (16, 24, 32):
+            self.depth_combo.addItem(f"{d} bit", d)
+        self.depth_combo.currentIndexChanged.connect(self._save)
+        layout.addRow("WAV 位深:", self.depth_combo)
 
         # 音量调整（dB）
         self.volume_spin = QDoubleSpinBox()
@@ -701,9 +799,47 @@ class MixerConfigPanel(QGroupBox):
         self.batch_parallel_check.toggled.connect(self._save)
         layout.addRow("", self.batch_parallel_check)
 
+    def _on_preset_changed(self):
+        """档位预设切换：联动参数控件并锁定/解锁。"""
+        preset = self.preset_combo.currentData()
+        if preset in self.PRESET_PARAMS:
+            br, sr, ch = self.PRESET_PARAMS[preset]
+            for w, val in ((self.bitrate_combo, br),
+                           (self.sr_combo, sr),
+                           (self.channels_combo, ch)):
+                idx = w.findData(val)
+                if idx >= 0:
+                    w.blockSignals(True)
+                    w.setCurrentIndex(idx)
+                    w.blockSignals(False)
+            self.bitrate_combo.setEnabled(False)
+            self.sr_combo.setEnabled(False)
+            self.channels_combo.setEnabled(False)
+        else:
+            self.bitrate_combo.setEnabled(True)
+            self.sr_combo.setEnabled(True)
+            self.channels_combo.setEnabled(True)
+        self._save()
+
+    def _on_quality_param_changed(self):
+        """手动修改任意参数后，档位自动切换为"自定义"。"""
+        preset = self.preset_combo.currentData()
+        if preset in self.PRESET_PARAMS:
+            idx = self.preset_combo.findData("custom")
+            if idx >= 0:
+                self.preset_combo.blockSignals(True)
+                self.preset_combo.setCurrentIndex(idx)
+                self.preset_combo.blockSignals(False)
+            self.bitrate_combo.setEnabled(True)
+            self.sr_combo.setEnabled(True)
+            self.channels_combo.setEnabled(True)
+        self._save()
+
     def _load_values(self):
         cfg = self.config.mixer_cfg
-        widgets = [self.output_edit, self.format_combo, self.volume_spin,
+        widgets = [self.output_edit, self.format_combo, self.preset_combo,
+                   self.bitrate_combo, self.sr_combo, self.channels_combo,
+                   self.depth_combo, self.volume_spin,
                    self.auto_vol_combo, self.channel_detect_check,
                    self.angle_left, self.angle_both, self.angle_right,
                    self.align_check, self.content_align_check, self.gpu_check,
@@ -720,6 +856,30 @@ class MixerConfigPanel(QGroupBox):
             idx = self.format_combo.findData(fmt)
             if idx >= 0:
                 self.format_combo.setCurrentIndex(idx)
+            # 音频质量
+            bitrate = cfg.get("audio_bitrate", "192k")
+            sample_rate = cfg.get("audio_sample_rate", 44100)
+            channels = cfg.get("audio_channels", 2)
+            for w, val in ((self.bitrate_combo, bitrate),
+                           (self.sr_combo, sample_rate),
+                           (self.channels_combo, channels),
+                           (self.depth_combo, cfg.get("wav_bit_depth", 16))):
+                idx = w.findData(val)
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+            # 根据参数匹配档位，不匹配则显示"自定义"
+            preset = "custom"
+            for p, params in self.PRESET_PARAMS.items():
+                if params == (bitrate, sample_rate, channels):
+                    preset = p
+                    break
+            idx = self.preset_combo.findData(preset)
+            if idx >= 0:
+                self.preset_combo.setCurrentIndex(idx)
+            is_custom = preset == "custom"
+            self.bitrate_combo.setEnabled(is_custom)
+            self.sr_combo.setEnabled(is_custom)
+            self.channels_combo.setEnabled(is_custom)
             # 音量
             self.volume_spin.setValue(cfg.get("volume_db", 0.0))
             # 自动音量
@@ -751,6 +911,11 @@ class MixerConfigPanel(QGroupBox):
         cfg = self.config.mixer_cfg
         cfg["output_folder"] = self.output_edit.text().strip()
         cfg["output_format"] = self.format_combo.currentData()
+        cfg["export_preset"] = self.preset_combo.currentData()
+        cfg["audio_bitrate"] = self.bitrate_combo.currentData()
+        cfg["audio_sample_rate"] = self.sr_combo.currentData()
+        cfg["audio_channels"] = self.channels_combo.currentData()
+        cfg["wav_bit_depth"] = self.depth_combo.currentData()
         cfg["volume_db"] = self.volume_spin.value()
         cfg["auto_volume"] = self.auto_vol_combo.currentData()
         cfg["channel_detect"] = self.channel_detect_check.isChecked()

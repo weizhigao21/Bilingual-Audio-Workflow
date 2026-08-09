@@ -71,6 +71,11 @@ DEFAULT_CONFIG = {
     "mixer": {
         "volume_db": 0.0,
         "output_format": "mp4",
+        "export_preset": "standard",
+        "audio_bitrate": "192k",
+        "audio_sample_rate": 44100,
+        "audio_channels": 2,
+        "wav_bit_depth": 16,
         "use_gpu": True,
         "channel_detect": True,
         "align_onset": True,

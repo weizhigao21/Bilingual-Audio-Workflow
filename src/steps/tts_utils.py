@@ -116,6 +116,22 @@ def _download_audio(audio_url, save_path, timeout=60):
         f.write(audio_resp.content)
 
 
+def test_api_server(url, timeout=5):
+    """测试 API 服务器是否可用。返回 (ok, msg)。"""
+    api_base_url = url.rstrip("/")
+    try:
+        resp = _session.get(api_base_url, timeout=timeout)
+        if resp.status_code == 200:
+            return True, "连接成功"
+        return False, f"HTTP {resp.status_code}"
+    except requests.exceptions.Timeout:
+        return False, "连接超时"
+    except requests.exceptions.ConnectionError:
+        return False, "连接失败"
+    except Exception as e:
+        return False, f"异常: {e}"
+
+
 def tts_bulk_task(tasks, api_url, model_name, audio_cache):
     results = [None] * len(tasks)
 
@@ -183,7 +199,7 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
             download_futures = {}
             with ThreadPoolExecutor(max_workers=5) as executor:
                 for i, (task, audio_url) in enumerate(zip(uncached_tasks, audio_urls)):
-                    idx, timestamp, text, save_dir = task
+                    idx, timestamp, text, save_dir, _ = task
                     save_path = generate_filename(idx, timestamp, text, save_dir)
                     future = executor.submit(_download_audio, audio_url, save_path)
                     download_futures[future] = (i, save_path, text)
@@ -200,6 +216,11 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
                     except Exception as e:
                         logger.error(f"下载音频失败: {file_name} - {e}")
                         results[uncached_indices[i]] = (False, f"下载异常: {file_name} - {str(e)}")
+
+            # 服务器未返回音频的任务补标记，避免 results 中出现 None
+            for i in range(len(uncached_tasks)):
+                if i >= len(audio_urls):
+                    results[uncached_indices[i]] = (False, "服务器未返回音频")
         else:
             error_msg = res_data.get('msg', '无返回URL')
             logger.warning(f"批量API无返回URL: {error_msg}, 回退到逐条模式")
