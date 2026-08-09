@@ -422,8 +422,11 @@ class BatchExecutor(QThread):
                 self.step_progress_signal.emit(step, max(0, min(100, mapped)))
 
         worker.progress_signal.connect(on_progress)
-        # TTS 步骤有 total_signal，转发以设置进度条上限
-        if hasattr(worker, 'total_signal'):
+        # TTS 步骤有 total_signal，单任务时转发以设置进度条上限（片段总数）。
+        # 多任务（批量/组）时进度为任务级累计百分比（0-100），
+        # 若用片段总数做进度条 range，百分比值会被 clamp 成 100%（进度条直接满格），
+        # 因此多任务时不再连接 total_signal。
+        if hasattr(worker, 'total_signal') and total <= 1:
             worker.total_signal.connect(
                 lambda t, s=step: self.step_total_signal.emit(s, t)
             )
@@ -443,13 +446,19 @@ class BatchExecutor(QThread):
             task.set_step_error(step, msg)
         return ok, msg
 
-    def _run_single_step_sync(self, task: TaskInfo, step: int):
+    def _run_single_step_sync(self, task: TaskInfo, step: int,
+                              base_pct: int = 0, span_pct: int = 100):
         """同步执行单个任务的单个步骤（供流水线线程调用）。
 
         与 _run_single_step 不同：不使用 QEventLoop 等待信号，
         而是 start() 后 wait() 阻塞，直接读取 worker.result 属性。
-        不转发任务内进度（多任务并发时任务内进度互相覆盖会导致进度条横跳），
-        进度由 _run_pipeline 按"每完成一个任务 +1/N"的累计值驱动。
+
+        任务内进度（步骤1/3，0-100 百分比）映射到
+        [base_pct, base_pct+span_pct] 区间转发，使进度条在任务执行期间
+        持续前进（修复"混音等待音频时一直显示 0%"）；任务完成后由
+        _run_pipeline 按"每完成一个任务 +1/N"的累计值推进到区间的精确位置。
+        步骤2（TTS）的 progress 信号是"已完成片段数"（0..total，非百分比），
+        多任务并发时无法映射，故不转发，由累计值驱动。
         """
         worker = self._create_worker(task, step)
         if not worker:
@@ -457,6 +466,15 @@ class BatchExecutor(QThread):
 
         task.set_step_status(step, STEP_RUNNING)
         worker.log_signal.connect(self.log_signal.emit)
+
+        def on_progress(v):
+            # TTS 进度是片段计数（非 0-100），交由任务级累计推进
+            if step == 2:
+                return
+            mapped = base_pct + int((v / 100.0) * span_pct)
+            self.step_progress_signal.emit(step, max(0, min(100, mapped)))
+
+        worker.progress_signal.connect(on_progress)
 
         self._track_worker(worker, True)
         worker.start()
@@ -509,8 +527,12 @@ class BatchExecutor(QThread):
                     continue
                 self.task_started.emit(task.task_id)
                 self.progress_signal.emit(i, total, 1)
-                ok, msg = self._run_single_step_sync(task, 1)
-                self.step_progress_signal.emit(1, int((i + 1) * 100 / total))
+                denom = max(1, total)
+                ok, msg = self._run_single_step_sync(
+                    task, 1,
+                    int(i * 100 / denom), int(100 / denom)
+                )
+                self.step_progress_signal.emit(1, int((i + 1) * 100 / denom))
                 # 无论成功失败都通知刷新任务列表（成功也要发，否则列表不更新进度）
                 self.task_finished.emit(task.task_id, ok)
                 if ok:
@@ -580,7 +602,10 @@ class BatchExecutor(QThread):
                             tts_queue.task_done()
                             break
                         self.task_started.emit(task.task_id)
-                        ok, msg = self._run_single_step_sync(task, 2)
+                        with progress_lock:
+                            base = int(tts_done * 100 / max(1, total_tts_tasks))
+                            span = int(100 / max(1, total_tts_tasks))
+                        ok, msg = self._run_single_step_sync(task, 2, base, span)
                         # 语音完成立即通知刷新任务列表（显示语音进度）
                         self.task_finished.emit(task.task_id, ok)
                         if ok:
@@ -621,7 +646,10 @@ class BatchExecutor(QThread):
                             mix_queue.task_done()
                             continue
                         self.task_started.emit(task.task_id)
-                        ok, msg = self._run_single_step_sync(task, 3)
+                        with progress_lock:
+                            base = int(mix_done * 100 / max(1, total_mix_tasks))
+                            span = int(100 / max(1, total_mix_tasks))
+                        ok, msg = self._run_single_step_sync(task, 3, base, span)
                         if ok:
                             self.log_signal.emit(f"[流水线] [{task.source_name}] 混音完成")
                         else:

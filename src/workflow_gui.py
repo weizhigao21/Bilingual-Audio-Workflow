@@ -578,6 +578,10 @@ class WorkflowMainWindow(QMainWindow):
         # 启动批量执行
         from .steps.batch_executor import BatchExecutor
         self._tts_total = 0  # 批量/流水线模式下进度为任务级累计，重置片段总数
+        # 重置三个步骤进度条，避免残留上次运行的值（批量执行中由累计进度驱动）
+        for p in self.step_panels.values():
+            p.progress.setRange(0, 100)
+            p.progress.setValue(0)
         self._batch_executor = BatchExecutor(
             list(self.task_queue.tasks), steps, self.config,
             order=order, parent=self
@@ -765,7 +769,11 @@ class WorkflowMainWindow(QMainWindow):
 
             # 进度条按步骤状态重置，避免残留上一次运行的值：
             # 完成/跳过 → 100%；待处理/失败 → 0%；运行中 → 保持实时进度（由进度信号驱动）
-            if status == STEP_RUNNING:
+            # 批量/流水线/组执行中：进度条完全由 step_progress_signal 驱动，
+            # 这里不重置，避免"任务完成 → DONE → setValue(100)"覆盖任务级累计进度
+            if self._batch_executor is not None:
+                pass
+            elif status == STEP_RUNNING:
                 pass
             elif status in (STEP_DONE, STEP_SKIPPED):
                 panel.progress.setRange(0, 100)
@@ -862,6 +870,10 @@ class WorkflowMainWindow(QMainWindow):
 
         from .steps.batch_executor import BatchExecutor
         self._tts_total = 0  # 组执行时进度为任务级累计，重置片段总数
+        # 重置三个步骤进度条，避免残留上次运行的值
+        for p in self.step_panels.values():
+            p.progress.setRange(0, 100)
+            p.progress.setValue(0)
         self._batch_executor = BatchExecutor(
             list(group.tasks), [step], self.config, order="by_task", parent=self
         )
@@ -883,6 +895,12 @@ class WorkflowMainWindow(QMainWindow):
 
     def _on_step_progress(self, step: int, value: int):
         panel = self.step_panels[step]
+        if self._batch_executor is not None:
+            # 批量/流水线/组执行：value 恒为 0-100 的任务级累计百分比，
+            # 统一按 0-100 显示，避免与 TTS 片段总数混用导致被 clamp 成 100%
+            panel.progress.setRange(0, 100)
+            panel.progress.setValue(max(0, min(100, value)))
+            return
         if step == 2:
             if self._tts_total > 0:
                 panel.progress.setRange(0, self._tts_total)
