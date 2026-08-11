@@ -10,6 +10,7 @@
     - "pipeline"   流水线：字幕先全部完成，然后语音生成与混音交错并行
                    （语音队列并行度=edge_threads，混音队列并行度可配，默认1）
 """
+import os
 import queue
 import threading
 
@@ -81,6 +82,60 @@ class BatchExecutor(QThread):
             else:
                 self._active_workers.discard(worker)
 
+    def _resolve_source_path(self, task: TaskInfo) -> bool:
+        """检查任务源文件是否存在；不存在时尝试常见路径变体自动修复。
+
+        常见失效场景：源文件夹被程序重命名添加"双语-"前缀（或用户手动改名），
+        任务.source_path 仍指向旧路径。这里沿父目录链逐级查找带"双语-"前缀
+        的目录段，生成"去前缀/加前缀"候选路径，找到则更新 task.source_path。
+
+        Returns:
+            True: 源文件可用（可能已自动修正 source_path）
+            False: 源文件不存在且无法修复（调用方应跳过该任务）
+        """
+        if os.path.exists(task.source_path):
+            return True
+
+        src = task.source_path
+        parent = os.path.dirname(src)
+        name = os.path.basename(src)
+
+        # 收集父目录链（文件所在目录 → 盘符根）
+        chain = []
+        cur = parent
+        while cur and cur != os.path.dirname(cur):
+            chain.append(cur)
+            cur = os.path.dirname(cur)
+
+        candidates = []
+        for d in chain:
+            try:
+                seg = os.path.basename(d)
+                rel = os.path.relpath(parent, d)
+                if seg.startswith("双语-") and len(seg) > 3:
+                    # 去前缀：双语-XXX → XXX
+                    alt_dir = os.path.join(os.path.dirname(d), seg[3:])
+                    candidates.append(os.path.join(alt_dir, rel, name))
+                else:
+                    # 加前缀：XXX → 双语-XXX
+                    alt_dir = os.path.join(os.path.dirname(d), f"双语-{seg}")
+                    candidates.append(os.path.join(alt_dir, rel, name))
+            except (OSError, ValueError):
+                continue
+
+        for cand in candidates:
+            if os.path.exists(cand):
+                self.log_signal.emit(
+                    f"[批量] [{task.source_name}] 源路径失效，自动修正: "
+                    f"{task.source_path} → {cand}"
+                )
+                task.source_path = cand
+                return True
+        self.log_signal.emit(
+            f"[批量] [{task.source_name}] 源文件不存在: {task.source_path}"
+        )
+        return False
+
     def run(self):
         total = len(self.tasks)
 
@@ -105,6 +160,13 @@ class BatchExecutor(QThread):
         for i, task in enumerate(self.tasks):
             if self._stop_flag:
                 break
+
+            # 源文件检查：不存在且无法自动修复 → 跳过任务，避免后续步骤白跑
+            if not self._resolve_source_path(task):
+                self.log_signal.emit(f"[批量] [{task.source_name}] 源文件不存在，跳过任务")
+                skipped += 1
+                self.task_finished.emit(task.task_id, False)
+                continue
 
             self.log_signal.emit(f"\n[批量] === 任务 {i + 1}/{total}: {task.source_name} ===")
             self.task_started.emit(task.task_id)
@@ -183,6 +245,13 @@ class BatchExecutor(QThread):
 
                 # 已失败的任务跳过
                 if task.task_id in failed_tasks:
+                    continue
+
+                # 源文件检查：不存在且无法自动修复 → 该任务所有步骤都跳过
+                if not self._resolve_source_path(task):
+                    self.log_signal.emit(f"[批量] [{task.source_name}] 源文件不存在，跳过任务")
+                    failed_tasks.add(task.task_id)
+                    self.task_finished.emit(task.task_id, False)
                     continue
 
                 # 检查是否正在运行
@@ -521,6 +590,12 @@ class BatchExecutor(QThread):
                     continue
                 if task.step_status(1) == STEP_RUNNING:
                     continue
+                # 源文件检查：不存在且无法自动修复 → 跳过任务
+                if not self._resolve_source_path(task):
+                    self.log_signal.emit(f"[流水线] [{task.source_name}] 源文件不存在，跳过任务")
+                    mark_failed(task.task_id)
+                    self.task_finished.emit(task.task_id, False)
+                    continue
                 if not task.is_step_ready(1):
                     mark_failed(task.task_id)
                     self.task_finished.emit(task.task_id, False)
@@ -577,6 +652,12 @@ class BatchExecutor(QThread):
             # 只放需要处理的步骤（跳过已完成/已失败的任务）
             for task in self.tasks:
                 if is_failed(task.task_id):
+                    continue
+                # 源文件检查：不存在且无法自动修复 → 跳过任务（语音/混音都依赖源文件）
+                if not self._resolve_source_path(task):
+                    self.log_signal.emit(f"[流水线] [{task.source_name}] 源文件不存在，跳过任务")
+                    mark_failed(task.task_id)
+                    self.task_finished.emit(task.task_id, False)
                     continue
                 if 2 in self.steps and task.step_status(2) not in (STEP_DONE, STEP_SKIPPED):
                     total_tts_tasks += 1

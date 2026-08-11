@@ -801,6 +801,13 @@ class WorkflowMainWindow(QMainWindow):
         if not task:
             QMessageBox.warning(self, "提示", "请先选择一个任务。")
             return
+        if not os.path.exists(task.source_path):
+            QMessageBox.warning(
+                self, "提示",
+                f"源文件不存在，无法执行：\n{task.source_path}\n\n"
+                f"可能已被移动或重命名（如添加\"双语-\"前缀），请重新导入任务。"
+            )
+            return
         if not task.is_step_ready(step):
             QMessageBox.warning(self, "提示", f"步骤 {step} 的前置步骤尚未完成。")
             return
