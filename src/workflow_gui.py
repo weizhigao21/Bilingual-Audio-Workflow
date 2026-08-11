@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v2.0.0")
+        self.setWindowTitle("双语音声工作流 v2.0.1")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
