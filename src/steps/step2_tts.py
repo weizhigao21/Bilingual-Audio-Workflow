@@ -109,7 +109,10 @@ class TTSBridgeWorker(QThread):
         # 创建 TTSWorker 并桥接信号
         self._tts_worker = TTSWorker(tts_config)
         self._tts_worker.log_signal.connect(self.log_signal.emit)
-        self._tts_worker.progress_signal.connect(self.progress_signal.emit)
+        # progress 先归一化为 0-100 百分比再转发：
+        # TTSWorker 发的是"已完成片段数"(0..total)，与步骤1/3 的百分比语义不一致，
+        # 导致批量/流水线模式下无法正确映射、单任务时被 clamp 成假 100%。
+        self._tts_worker.progress_signal.connect(self._on_progress)
         # 完成/总数回调必须用 DirectConnection：
         # 在流水线模式下 TTSBridgeWorker 可能创建于无事件循环的 python 线程，
         # QueuedConnection 的信号永远不会被处理，导致 result 不被写入
@@ -132,6 +135,20 @@ class TTSBridgeWorker(QThread):
     def _on_total(self, total: int):
         self._total = total
         self.total_signal.emit(total)
+
+    def _on_progress(self, completed: int):
+        """把 TTSWorker 的"已完成片段数"归一化为 0-100 百分比。
+
+        completed 可能从"已存在跳过的文件数"起步（TTSWorker 内部语义），
+        total 是全部片段数（含已跳过），因此起点即为真实已完成比例，
+        之后随合成进度单调递增到 100。
+        """
+        total = self._total
+        if total > 0:
+            pct = min(100, max(0, int(completed * 100 / total)))
+        else:
+            pct = completed  # total 未就绪时的兜底，保持原值
+        self.progress_signal.emit(pct)
 
     def _on_finished(self, success: bool):
         """TTSWorker 完成回调。"""

@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QTextEdit, QLabel, QSplitter, QGroupBox
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QColor, QTextCharFormat, QTextCursor
 
 from .config import WorkflowConfig, SetupDialog
 from .task_manager import (
@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v2.0.1")
+        self.setWindowTitle("双语音声工作流 v2.0.2")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -159,6 +159,8 @@ class WorkflowMainWindow(QMainWindow):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
+        # 最多保留 5000 行，超出自动丢弃最旧日志，防止长时间运行无限增长
+        self.log_view.document().setMaximumBlockCount(5000)
         log_layout.addWidget(self.log_view)
         right_layout.addWidget(log_group, 1)
 
@@ -577,7 +579,7 @@ class WorkflowMainWindow(QMainWindow):
 
         # 启动批量执行
         from .steps.batch_executor import BatchExecutor
-        self._tts_total = 0  # 批量/流水线模式下进度为任务级累计，重置片段总数
+        self._tts_total = 0  # 批量/流水线模式下进度为 0-100 百分比，重置片段总数记录
         # 重置三个步骤进度条，避免残留上次运行的值（批量执行中由累计进度驱动）
         for p in self.step_panels.values():
             p.progress.setRange(0, 100)
@@ -876,7 +878,7 @@ class WorkflowMainWindow(QMainWindow):
             return
 
         from .steps.batch_executor import BatchExecutor
-        self._tts_total = 0  # 组执行时进度为任务级累计，重置片段总数
+        self._tts_total = 0  # 组执行时进度为 0-100 百分比，重置片段总数记录
         # 重置三个步骤进度条，避免残留上次运行的值
         for p in self.step_panels.values():
             p.progress.setRange(0, 100)
@@ -896,34 +898,21 @@ class WorkflowMainWindow(QMainWindow):
         self._batch_executor.start()
 
     def _on_tts_total(self, total: int):
+        # 进度条已统一为 0-100 百分比（TTS 进度由 TTSBridgeWorker 归一化），
+        # 片段总数仅记录备用，不再作为进度条 range
         self._tts_total = total
-        if total > 0:
-            self.step_panels[2].progress.setRange(0, total)
 
     def _on_step_progress(self, step: int, value: int):
+        # 所有步骤（含 TTS）的 progress 均为 0-100 百分比，
+        # 统一 range 显示，避免片段数与百分比混用导致 clamp 假 100%/回退
         panel = self.step_panels[step]
-        if self._batch_executor is not None:
-            # 批量/流水线/组执行：value 恒为 0-100 的任务级累计百分比，
-            # 统一按 0-100 显示，避免与 TTS 片段总数混用导致被 clamp 成 100%
-            panel.progress.setRange(0, 100)
-            panel.progress.setValue(max(0, min(100, value)))
-            return
-        if step == 2:
-            if self._tts_total > 0:
-                panel.progress.setRange(0, self._tts_total)
-                panel.progress.setValue(value)
-            else:
-                panel.progress.setRange(0, 100)
-                panel.progress.setValue(value)
-        else:
-            panel.progress.setRange(0, 100)
-            panel.progress.setValue(value)
+        panel.progress.setRange(0, 100)
+        panel.progress.setValue(max(0, min(100, value)))
 
     def _on_step_total(self, step: int, total: int):
-        """步骤内总任务数（如 TTS 的总片段数），用于设置进度条上限。"""
+        """步骤内总任务数（如 TTS 的总片段数），仅记录，进度条 range 恒为 0-100。"""
         if step == 2 and total > 0:
             self._tts_total = total
-            self.step_panels[2].progress.setRange(0, total)
 
     def _on_step_finished(self, step: int, task: TaskInfo, success: bool, msg: str):
         if success:
@@ -1156,7 +1145,25 @@ class WorkflowMainWindow(QMainWindow):
 
     # ========== 日志 ==========
     def _append_log(self, msg: str):
-        self.log_view.append(msg)
+        """追加一条日志：带时间戳，按消息特征着色（成功绿/失败红/警告橙）。"""
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+
+        # 按内容特征推断级别并着色
+        color = QColor("#0C447C")  # 默认：深蓝
+        low = msg.lower()
+        if any(k in low for k in ("失败", "错误", "异常", "中止", "不存在", "error", "failed")):
+            color = QColor("#A32D2D")  # 红
+        elif any(k in low for k in ("警告", "warn")):
+            color = QColor("#854F0B")  # 橙
+        elif any(k in low for k in ("完成", "成功", "done", "success")):
+            color = QColor("#0F6E56")  # 绿
+
+        fmt = QTextCharFormat()
+        fmt.setForeground(color)
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(line + "\n", fmt)
+        self.log_view.setTextCursor(cursor)
         # 自动滚动到底部
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())

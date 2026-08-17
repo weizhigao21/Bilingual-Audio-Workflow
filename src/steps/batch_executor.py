@@ -461,8 +461,8 @@ class BatchExecutor(QThread):
 
         task_index/total 用于把任务内进度(0-100)映射到任务间累计进度，
         使批量/组执行时步骤进度条按"已完成任务数/总任务数"递增。
-        步骤2（语音）多任务时忽略任务内片段进度，按任务级累计推进，
-        避免"第一个任务完成就 100%"的误导。
+        所有步骤（含语音）的 progress 均为 0-100 百分比，
+        多任务时映射为"任务间累计 + 任务内片段进度"的平滑值。
         """
         worker = self._create_worker(task, step)
         if not worker:
@@ -476,13 +476,16 @@ class BatchExecutor(QThread):
             result[0] = (ok, msg)
             loop.quit()
 
-        worker.log_signal.connect(self.log_signal.emit)
+        # 统一给 worker 日志加任务名前缀：批量/流水线多任务并发时，
+        # 单任务 worker（WhisperWorker/TTSBridgeWorker/MixerWorker）内部日志
+        # 不带任务名，不加前缀会完全无法区分归属
+        worker.log_signal.connect(
+            lambda m, n=task.source_name: self.log_signal.emit(f"[{n}] {m}")
+        )
 
         def on_progress(v):
-            # 多任务时语音进度按任务级累计（每完成一个任务 +1/N，由调用方推进），
-            # 忽略任务内片段进度；单任务仍显示片段级进度
-            if total > 1 and step == 2:
-                return
+            # 所有步骤的进度统一为 0-100 百分比（TTS 已在 TTSBridgeWorker 归一化）。
+            # 单任务直接转发；多任务映射到任务间累计区间，任务内平滑推进
             if total <= 1:
                 self.step_progress_signal.emit(step, v)
             else:
@@ -491,11 +494,9 @@ class BatchExecutor(QThread):
                 self.step_progress_signal.emit(step, max(0, min(100, mapped)))
 
         worker.progress_signal.connect(on_progress)
-        # TTS 步骤有 total_signal，单任务时转发以设置进度条上限（片段总数）。
-        # 多任务（批量/组）时进度为任务级累计百分比（0-100），
-        # 若用片段总数做进度条 range，百分比值会被 clamp 成 100%（进度条直接满格），
-        # 因此多任务时不再连接 total_signal。
-        if hasattr(worker, 'total_signal') and total <= 1:
+        # TTS 步骤有 total_signal（片段总数），转发仅用于记录/日志展示。
+        # 进度条 range 已统一为 0-100，不再依赖片段总数。
+        if hasattr(worker, 'total_signal'):
             worker.total_signal.connect(
                 lambda t, s=step: self.step_total_signal.emit(s, t)
             )
@@ -522,24 +523,24 @@ class BatchExecutor(QThread):
         与 _run_single_step 不同：不使用 QEventLoop 等待信号，
         而是 start() 后 wait() 阻塞，直接读取 worker.result 属性。
 
-        任务内进度（步骤1/3，0-100 百分比）映射到
+        任务内进度（各步骤均为 0-100 百分比）映射到
         [base_pct, base_pct+span_pct] 区间转发，使进度条在任务执行期间
         持续前进（修复"混音等待音频时一直显示 0%"）；任务完成后由
         _run_pipeline 按"每完成一个任务 +1/N"的累计值推进到区间的精确位置。
-        步骤2（TTS）的 progress 信号是"已完成片段数"（0..total，非百分比），
-        多任务并发时无法映射，故不转发，由累计值驱动。
         """
         worker = self._create_worker(task, step)
         if not worker:
             return False, "无法创建 worker"
 
         task.set_step_status(step, STEP_RUNNING)
-        worker.log_signal.connect(self.log_signal.emit)
+        # 与 _run_single_step 一致：worker 日志统一加任务名前缀
+        worker.log_signal.connect(
+            lambda m, n=task.source_name: self.log_signal.emit(f"[{n}] {m}")
+        )
 
         def on_progress(v):
-            # TTS 进度是片段计数（非 0-100），交由任务级累计推进
-            if step == 2:
-                return
+            # 所有步骤的进度统一为 0-100 百分比（TTS 已在 TTSBridgeWorker 归一化），
+            # 映射到 [base_pct, base_pct+span_pct] 区间，任务内平滑推进
             mapped = base_pct + int((v / 100.0) * span_pct)
             self.step_progress_signal.emit(step, max(0, min(100, mapped)))
 
@@ -603,6 +604,9 @@ class BatchExecutor(QThread):
                 self.task_started.emit(task.task_id)
                 self.progress_signal.emit(i, total, 1)
                 denom = max(1, total)
+                self.log_signal.emit(
+                    f"[流水线] [{task.source_name}] 开始字幕提取"
+                )
                 ok, msg = self._run_single_step_sync(
                     task, 1,
                     int(i * 100 / denom), int(100 / denom)
@@ -615,6 +619,7 @@ class BatchExecutor(QThread):
                 else:
                     self.log_signal.emit(f"[流水线] [{task.source_name}] 字幕失败: {msg}")
                     mark_failed(task.task_id)
+            self.log_signal.emit("[流水线] 阶段1 字幕提取完成")
 
         # ---------- 阶段2：语音 + 混音流水线 ----------
         if 2 not in self.steps and 3 not in self.steps:
@@ -683,6 +688,9 @@ class BatchExecutor(QThread):
                             tts_queue.task_done()
                             break
                         self.task_started.emit(task.task_id)
+                        self.log_signal.emit(
+                            f"[流水线] [{task.source_name}] 开始语音生成"
+                        )
                         with progress_lock:
                             base = int(tts_done * 100 / max(1, total_tts_tasks))
                             span = int(100 / max(1, total_tts_tasks))
@@ -724,9 +732,16 @@ class BatchExecutor(QThread):
                             mix_queue.task_done()
                             break
                         if is_failed(task.task_id):
+                            # 语音阶段已失败的任务不再混音，明确打日志避免"静默跳过"
+                            self.log_signal.emit(
+                                f"[流水线] [{task.source_name}] 语音阶段失败，跳过混音"
+                            )
                             mix_queue.task_done()
                             continue
                         self.task_started.emit(task.task_id)
+                        self.log_signal.emit(
+                            f"[流水线] [{task.source_name}] 开始混音"
+                        )
                         with progress_lock:
                             base = int(mix_done * 100 / max(1, total_mix_tasks))
                             span = int(100 / max(1, total_mix_tasks))
@@ -765,6 +780,7 @@ class BatchExecutor(QThread):
             tts_done_event.set()
             for t in mix_threads:
                 t.join()
+            self.log_signal.emit("[流水线] 语音与混音全部完成")
 
             # 语音/混音进度条收尾
             self.step_progress_signal.emit(2, 100)
