@@ -948,6 +948,11 @@ class MixerConfigPanel(QGroupBox):
         self.folder_prefix_check.toggled.connect(self._save)
         layout.addRow("", self.folder_prefix_check)
 
+        # 输出目录带源文件夹名前缀
+        self.output_prefix_check = QCheckBox("输出目录带源文件夹名前缀（双语 → 双语-文件夹名，仅文件夹导入）")
+        self.output_prefix_check.toggled.connect(self._save)
+        layout.addRow("", self.output_prefix_check)
+
         # 跳过已存在
         self.skip_check = QCheckBox("跳过已存在的输出文件")
         self.skip_check.toggled.connect(self._save)
@@ -1010,6 +1015,7 @@ class MixerConfigPanel(QGroupBox):
                    self.angle_left, self.angle_both, self.angle_right,
                    self.align_check, self.content_align_check, self.gpu_check,
                    self.suffix_check, self.folder_prefix_check,
+                   self.output_prefix_check,
                    self.skip_check, self.thread_spin,
                    self.batch_parallel_check]
         for w in widgets:
@@ -1066,6 +1072,7 @@ class MixerConfigPanel(QGroupBox):
             self.gpu_check.setChecked(cfg.get("use_gpu", True))
             self.suffix_check.setChecked(cfg.get("add_suffix", True))
             self.folder_prefix_check.setChecked(cfg.get("folder_prefix", True))
+            self.output_prefix_check.setChecked(cfg.get("output_folder_prefix", False))
             self.skip_check.setChecked(cfg.get("skip_existing", True))
             self.thread_spin.setValue(cfg.get("thread_count", 4))
             self.batch_parallel_check.setChecked(cfg.get("enable_batch_parallel", True))
@@ -1095,6 +1102,7 @@ class MixerConfigPanel(QGroupBox):
         cfg["use_gpu"] = self.gpu_check.isChecked()
         cfg["add_suffix"] = self.suffix_check.isChecked()
         cfg["folder_prefix"] = self.folder_prefix_check.isChecked()
+        cfg["output_folder_prefix"] = self.output_prefix_check.isChecked()
         cfg["skip_existing"] = self.skip_check.isChecked()
         cfg["thread_count"] = self.thread_spin.value()
         cfg["enable_batch_parallel"] = self.batch_parallel_check.isChecked()

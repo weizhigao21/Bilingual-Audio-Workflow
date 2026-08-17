@@ -78,10 +78,23 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         return False, f"配音目录不存在: {mix_folder}"
 
     cfg = config.mixer_cfg
-    # 导出目录：有自定义目录用自定义的，否则在源文件同目录下创建"双语"子文件夹
+    # 导出目录优先级：
+    # 1. 自定义目录（output_folder）
+    # 2. 文件夹导入 + 输出前缀配置：父目录/双语-<源文件夹名>（输出直接在该目录根，
+    #    不嵌套"双语"子目录；源文件夹本身已带"双语-"前缀时直接输出到其根目录）
+    # 3. 默认：源文件同目录下的"双语"子文件夹
     custom_output = cfg.get("output_folder", "").strip()
     if custom_output:
         output_folder = custom_output
+    elif task.from_folder and cfg.get("output_folder_prefix", False):
+        src_dir = os.path.dirname(original_path)
+        parent = os.path.dirname(src_dir)
+        dir_name = os.path.basename(src_dir)
+        if dir_name.startswith("双语-"):
+            # 源文件夹已是双语- 前缀（重跑/已重命名过），直接输出到其根目录
+            output_folder = src_dir
+        else:
+            output_folder = os.path.join(parent, f"双语-{dir_name}")
     else:
         output_folder = os.path.join(os.path.dirname(original_path), "双语")
     os.makedirs(output_folder, exist_ok=True)

@@ -86,6 +86,7 @@ DEFAULT_CONFIG = {
         "add_suffix": True,
         "skip_existing": True,
         "output_folder": "",
+        "output_folder_prefix": False,
         "thread_count": 4,
         "enable_batch_parallel": True,
         "folder_prefix": True,

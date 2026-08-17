@@ -190,28 +190,42 @@ class TaskInfo:
         return ""
 
     def _detect_mix_output(self):
-        """检查源文件目录下"双语"文件夹是否有已生成的混音文件。
+        """检查已有混音输出，兼容三种目录结构：
+        1. 源目录下"双语"子目录（默认）
+        2. 父目录下"双语-<源文件夹名>"（输出前缀配置开启时的输出位置）
+        3. 源目录本身已带"双语-"前缀时，输出直接在其根目录
 
         Returns:
             str: 混音文件路径，未找到则返回空字符串
         """
         source_dir = os.path.dirname(self.source_path)
-        bilingual_dir = os.path.join(source_dir, "双语")
-        if not os.path.isdir(bilingual_dir):
-            return ""
+        candidates = []
+        if self.from_folder and os.path.basename(source_dir).startswith("双语-"):
+            # 源文件夹已带前缀：输出直接在其根目录
+            candidates.append(source_dir)
+        else:
+            candidates.append(os.path.join(source_dir, "双语"))
+            if self.from_folder:
+                parent = os.path.dirname(source_dir)
+                dir_name = os.path.basename(source_dir)
+                if parent and dir_name:
+                    candidates.append(os.path.join(parent, f"双语-{dir_name}"))
         # 找匹配源文件名的输出，常见格式
         common_exts = {".mp4", ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mkv"}
-        for c in os.listdir(bilingual_dir):
-            c_path = os.path.join(bilingual_dir, c)
-            if not os.path.isfile(c_path):
+        for bilingual_dir in candidates:
+            if not os.path.isdir(bilingual_dir):
                 continue
-            name, ext = os.path.splitext(c)
-            if ext.lower() not in common_exts:
-                continue
-            # 匹配 source_name 或 source_name_mixed
-            stem = name.removesuffix("_mixed")
-            if stem == self.source_name:
-                return c_path
+            for c in os.listdir(bilingual_dir):
+                c_path = os.path.join(bilingual_dir, c)
+                if not os.path.isfile(c_path):
+                    continue
+                name, ext = os.path.splitext(c)
+                if ext.lower() not in common_exts:
+                    continue
+                # 匹配 source_name 或 source_name_mixed
+                stem = name.removesuffix("_mixed")
+                if stem == self.source_name:
+                    return c_path
         return ""
 
     def overall_progress(self) -> float:
