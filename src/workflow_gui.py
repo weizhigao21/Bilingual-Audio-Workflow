@@ -939,13 +939,28 @@ class WorkflowMainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _resolve_source_folder(self, task: TaskInfo) -> str:
+        """返回任务当前应重命名的源文件夹（磁盘上真实存在的那个）。
+
+        import_folder 记录拖入时的原始路径；若文件夹已被重命名，import_folder
+        仍是旧路径（磁盘上不存在），此时回退到 source_path 所在目录
+        （source_path 每次都被 _resolve_source_path 自动修正到当前有效路径）。
+        """
+        import_folder = task.import_folder
+        if import_folder and os.path.isdir(import_folder):
+            return import_folder
+        src_dir = os.path.dirname(task.source_path)
+        if os.path.isdir(src_dir):
+            return src_dir
+        return import_folder or src_dir
+
     def _do_rename_source_folder(self, task: TaskInfo):
-        source_dir = task.import_folder or os.path.dirname(task.source_path)
+        source_dir = self._resolve_source_folder(task)
         # 检查同文件夹的其他任务是否都已完成混音
         for t in self.task_queue.tasks:
             if t is task:
                 continue
-            t_dir = t.import_folder or os.path.dirname(t.source_path)
+            t_dir = self._resolve_source_folder(t)
             if t_dir == source_dir and t.step3_status not in (STEP_DONE, STEP_FAILED, STEP_SKIPPED):
                 return  # 还有未完成的任务，等最后一个再重命名
         parent = os.path.dirname(source_dir)
@@ -974,15 +989,18 @@ class WorkflowMainWindow(QMainWindow):
             self._append_log(f"[重命名] 失败 (已重试3次): {dir_name}")
             return
 
-        # 同步更新所有同源目录任务的 source_path
+        # 同步更新所有同源目录任务的 source_path 与 import_folder，
+        # 避免 import_folder 残留旧路径，导致后续批量重命名误判"目标已存在"
         for t in self.task_queue.tasks:
             if os.path.dirname(t.source_path) == new_path:
+                t.import_folder = new_path
                 continue
             try:
                 if os.path.commonpath([t.source_path, source_dir]) != source_dir:
                     continue
                 rel = os.path.relpath(t.source_path, source_dir)
                 t.source_path = os.path.join(new_path, rel)
+                t.import_folder = new_path
                 t.from_folder = True
             except (OSError, ValueError):
                 continue
@@ -1007,7 +1025,7 @@ class WorkflowMainWindow(QMainWindow):
             folders_to_rename = set()
             for t in self.task_queue.tasks:
                 if t.from_folder and t.step3_status in (STEP_DONE, STEP_SKIPPED):
-                    source_dir = t.import_folder or os.path.dirname(t.source_path)
+                    source_dir = self._resolve_source_folder(t)
                     dir_name = os.path.basename(source_dir)
                     if not dir_name.startswith("双语-"):
                         folders_to_rename.add(source_dir)
@@ -1044,6 +1062,7 @@ class WorkflowMainWindow(QMainWindow):
                             continue
                         rel = os.path.relpath(t.source_path, folder)
                         t.source_path = os.path.join(new_path, rel)
+                        t.import_folder = new_path
                     except ValueError:
                         continue
                 self._append_log(f"[重命名] 文件夹已重命名: {dir_name} → {new_name}")
