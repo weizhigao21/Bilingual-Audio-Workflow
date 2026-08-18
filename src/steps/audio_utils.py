@@ -25,6 +25,22 @@ except ImportError:
 
 _mix_files_cache = {}
 
+# 声道检测的共享线程池：外层（批量混音任务）与内层（单个任务内的片段检测）
+# 复用同一容量，避免批量模式下并发数乘方（外层 N × 内层 M）。
+_pan_detect_executor = None
+_pan_detect_workers = 0
+
+
+def _get_pan_detect_executor(max_workers):
+    """惰性返回按容量复用的检测线程池；容量变化时销毁重建（不等待旧任务）。"""
+    global _pan_detect_executor, _pan_detect_workers
+    if _pan_detect_executor is None or _pan_detect_workers != max_workers:
+        if _pan_detect_executor is not None:
+            _pan_detect_executor.shutdown(wait=False)
+        _pan_detect_executor = ThreadPoolExecutor(max_workers=max_workers)
+        _pan_detect_workers = max_workers
+    return _pan_detect_executor
+
 
 def parse_filename(filename):
     pattern = r"^(\d{4})_(\d{2})-(\d{2})-(\d{2})\.(\d{2})_(.+)\.wav$"
@@ -69,41 +85,6 @@ def get_mix_audio_files(mix_folder):
 
 def clear_mix_cache():
     _mix_files_cache.clear()
-
-
-_voice_channel_cache = {}
-
-
-def clear_voice_cache():
-    _voice_channel_cache.clear()
-
-
-def detect_voice_channel(audio_segment, sample_duration_ms=30000):
-    if not HAS_NUMPY:
-        return 'both'
-
-    if audio_segment.channels != 2:
-        return 'both'
-
-    sr = audio_segment.frame_rate
-    max_frames = int(min(sample_duration_ms / 1000, len(audio_segment) / 1000) * sr)
-    if max_frames < sr * 2:
-        return 'both'
-
-    try:
-        samples = np.array(audio_segment.get_array_of_samples(), dtype=np.float32)
-        if len(samples) % 2 != 0:
-            samples = samples[:-1]
-        if len(samples) < 4:
-            return 'both'
-        samples_2d = samples.reshape(-1, 2)
-
-        # 截取到 max_frames
-        samples_2d = samples_2d[:max_frames]
-        return _detect_voice_channel_from_samples(samples_2d, sr)
-    except Exception as e:
-        logger.warning(f"[人声检测] 异常: {e}")
-        return 'both'
 
 
 def _detect_voice_channel_from_samples(samples_2d, sr):
@@ -293,25 +274,6 @@ def find_nearest_onset(mono_samples, sr, target_ms, search_start_ms, search_end_
         return target_ms
 
 
-def get_voice_channel_cached(audio_path):
-    if audio_path in _voice_channel_cache:
-        return _voice_channel_cache[audio_path]
-
-    try:
-        audio = AudioSegment.from_file(audio_path)
-        result = detect_voice_channel(audio)
-    except Exception:
-        result = 'both'
-
-    _voice_channel_cache[audio_path] = result
-    return result
-
-
-def overlay_to_channel(original, mix_segment, position, target_channel):
-    angle_map = {'left': 0, 'both': 90, 'right': 180}
-    return overlay_with_pan(original, mix_segment, position, angle_map.get(target_channel, 90))
-
-
 def overlay_with_pan(original, mix_segment, position, angle_degrees):
     import math
     if mix_segment.channels == 1:
@@ -381,33 +343,31 @@ def detect_angles_parallel(original_audio, audio_files, channel_map, max_workers
     if not HAS_NUMPY:
         return {af["filename"]: 180 for af in audio_files}
 
-    # 一次性把原始音频转为 numpy 数组，避免每个片段都做 pydub 切片复制
     sr = original_audio.frame_rate
     dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
     dtype = dtype_map.get(original_audio.sample_width, np.int16)
-    raw_samples = np.frombuffer(original_audio.raw_data, dtype=dtype)
-    if original_audio.channels == 2:
-        if len(raw_samples) % 2 != 0:
-            raw_samples = raw_samples[:-1]
-        full_samples_2d = raw_samples.reshape(-1, 2).astype(np.float32)
-    else:
-        # 单声道复制为双声道
-        full_samples_2d = np.column_stack(
-            [raw_samples, raw_samples]
-        ).astype(np.float32)
+    channels = original_audio.channels
+    frame_bytes = original_audio.sample_width * channels
+    raw = original_audio.raw_data
+    total_frames = len(raw) // frame_bytes
 
     min_segment_samples = int(2 * sr)  # 至少 2 秒才检测
+    window_frames = int(10000 * sr / 1000)
 
     def detect_one(audio_info):
         t_ms = audio_info["timestamp_ms"]
-        window_ms = 10000
-        # 按帧偏移切片（numpy view，不复制数据）
         start_frame = int(t_ms * sr / 1000)
-        end_frame = min(int((t_ms + window_ms) * sr / 1000), len(full_samples_2d))
+        end_frame = min(start_frame + window_frames, total_frames)
         voice_channel = 'both'
         if end_frame - start_frame >= min_segment_samples:
-            # 切片是 view，但传给 _detect_voice_channel_from_samples 后只读不改，安全
-            segment = full_samples_2d[start_frame:end_frame]
+            # 仅对 10s 窗口转换（约几 MB），避免整段音频常驻为 float32 大数组
+            start_byte = start_frame * frame_bytes
+            end_byte = end_frame * frame_bytes
+            chunk = np.frombuffer(raw[start_byte:end_byte], dtype=dtype)
+            if channels == 2:
+                segment = chunk.reshape(-1, 2).astype(np.float32)
+            else:
+                segment = np.column_stack([chunk, chunk]).astype(np.float32)
             voice_channel = _detect_voice_channel_from_samples(segment, sr)
         angle = channel_map.get(voice_channel, 180)
         return audio_info["filename"], voice_channel, angle
@@ -420,12 +380,14 @@ def detect_angles_parallel(original_audio, audio_files, channel_map, max_workers
             results[fn] = angle
             logger.debug(f"[检测] {fn} 人声在{vc} → 混音角度{angle}°")
     else:
-        with ThreadPoolExecutor(max_workers=thread_count) as executor:
-            futures = {executor.submit(detect_one, af): af for af in audio_files}
-            for future in as_completed(futures):
-                fn, vc, angle = future.result()
-                results[fn] = angle
-                logger.debug(f"[检测] {fn} 人声在{vc} → 混音角度{angle}°")
+        # 复用共享检测池：外层（批量任务）与内层（本段检测）同池排队，
+        # 总并发不超过容量，避免批量模式下并发数乘方。
+        executor = _get_pan_detect_executor(thread_count)
+        futures = {executor.submit(detect_one, af): af for af in audio_files}
+        for future in as_completed(futures):
+            fn, vc, angle = future.result()
+            results[fn] = angle
+            logger.debug(f"[检测] {fn} 人声在{vc} → 混音角度{angle}°")
     return results
 
 
@@ -445,34 +407,57 @@ def compute_rms_db(audio_segment):
         return -20.0
 
 
+def _mono_float_from_frames(raw, dtype, channels, width, f0, f1):
+    """按帧区间切片原始字节并转为单声道 float64，内存有界（不物化整段音频）。"""
+    if f1 <= f0:
+        return None
+    buf = raw[f0 * width * channels: f1 * width * channels]
+    arr = np.frombuffer(buf, dtype=dtype)
+    if channels == 2:
+        return (arr[0::2].astype(np.float64) + arr[1::2].astype(np.float64)) * 0.5
+    return arr.astype(np.float64)
+
+
 def compute_rms_envelope(audio_segment, window_ms=100, hop_ms=50):
     if np is None:
         return None, hop_ms
     try:
         dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
         dtype = dtype_map.get(audio_segment.sample_width, np.int16)
-        samples = np.frombuffer(audio_segment.raw_data, dtype=dtype).astype(np.float64)
-        if audio_segment.channels == 2:
-            samples = (samples[0::2] + samples[1::2]) / 2.0
+        raw = audio_segment.raw_data
+        channels = audio_segment.channels
+        width = audio_segment.sample_width
         sr = audio_segment.frame_rate
         window_frames = int(window_ms * sr / 1000)
         hop_frames = int(hop_ms * sr / 1000)
-        max_val = 2 ** (audio_segment.sample_width * 8 - 1)
+        if window_frames <= 0 or hop_frames <= 0:
+            return None, hop_ms
+        max_val = 2 ** (width * 8 - 1)
 
-        if len(samples) < window_frames:
+        total_frames = len(raw) // (width * channels)
+
+        if total_frames < window_frames:
             # 数据不足一个窗口，返回单点包络
-            rms_val = np.sqrt(np.mean(samples ** 2)) if len(samples) > 0 else 0.0
+            mono = _mono_float_from_frames(raw, dtype, channels, width, 0, total_frames)
+            rms_val = float(np.sqrt(np.mean(mono * mono))) if mono is not None and len(mono) else 0.0
             return np.array([20.0 * np.log10(max(rms_val, 1.0) / max_val)]), hop_ms
 
-        # 用 sliding_window_view 一次性向量化，避免 Python 层 for 循环
-        # 形状: (num_valid_windows, window_frames)
-        windows = np.lib.stride_tricks.sliding_window_view(samples, window_frames)
-        # 按 hop 采样，与原循环的 (len - window) // hop + 1 对齐
-        windows = windows[::hop_frames]
-        # 计算 RMS: sqrt(mean(x^2)) = sqrt(sum(x^2) / window_frames)
-        rms_vals = np.sqrt(np.mean(windows * windows, axis=1))
-        rms_envelope = 20.0 * np.log10(np.maximum(rms_vals, 1.0) / max_val)
-        return rms_envelope, hop_ms
+        # 分块向量化：窗口起点固定在全局 hop 整数倍上，每个块只转换其所覆盖的帧区间，
+        # 避免把整段音频一次性转成 float64、也不展开全部 (num_windows × window_frames) 方阵。
+        window_count = ((total_frames - window_frames) // hop_frames) + 1
+        wins_per_block = 128
+        parts = []
+        for s0 in range(0, window_count, wins_per_block):
+            s1 = min(s0 + wins_per_block, window_count)
+            starts = np.arange(s0, s1, dtype=np.int64) * hop_frames
+            mono = _mono_float_from_frames(
+                raw, dtype, channels, width,
+                int(starts[0]), int(starts[-1] + window_frames),
+            )
+            wins = np.lib.stride_tricks.sliding_window_view(mono, window_frames)[::hop_frames]
+            rms_vals = np.sqrt(np.mean(wins * wins, axis=1))
+            parts.append(20.0 * np.log10(np.maximum(rms_vals, 1.0) / max_val))
+        return np.concatenate(parts), hop_ms
     except Exception:
         return None, hop_ms
 
@@ -528,7 +513,6 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
             stereo = np.column_stack([raw.astype(np.float32), raw.astype(np.float32)])
 
         total_frames = len(stereo)
-        mix_buffer = np.zeros_like(stereo)
 
         # 内容对齐：预计算单声道样本（复用已加载的 stereo 数组，避免重复加载原音频）
         mono_samples = None
@@ -643,18 +627,16 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
             left_gain = math.cos(angle_rad / 2.0)
             right_gain = math.sin(angle_rad / 2.0)
 
-            mix_buffer[start_frame:end_frame, 0] += mix_chunk * left_gain
-            mix_buffer[start_frame:end_frame, 1] += mix_chunk * right_gain
+            stereo[start_frame:end_frame, 0] += mix_chunk * left_gain
+            stereo[start_frame:end_frame, 1] += mix_chunk * right_gain
 
             if i < 3:
                 logger.debug(f"[混音] 片段{i}: pos={pos_ms}ms, frames={mix_frames}, angle={angle}°, "
                       f"L_gain={left_gain:.3f}, R_gain={right_gain:.3f}, "
                       f"chunk_max={np.max(np.abs(mix_chunk)):.1f}")
 
-        logger.debug(f"[混音] mix_buffer max={np.max(np.abs(mix_buffer)):.1f}, "
-              f"non_zero={np.count_nonzero(mix_buffer)}")
+        logger.debug(f"[混音] 累加后 max={np.max(np.abs(stereo)):.1f}")
 
-        stereo += mix_buffer
         max_val = 2 ** (sample_width * 8 - 1) - 1
 
         threshold = 0.9

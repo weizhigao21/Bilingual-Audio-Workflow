@@ -2,7 +2,6 @@
 import os
 import sys
 import subprocess
-import hashlib
 from pathlib import Path
 
 
@@ -73,17 +72,4 @@ def is_cuda_available():
         _CUDA_CHECKED = True
     return _CUDA_AVAILABLE
 
-VIDEO_EXTENSIONS = {"mp4", "mkv", "avi", "mov", "flv", "wmv", "webm", "ts"}
-AUDIO_EXTENSIONS = {"wav", "mp3", "flac", "ogg", "m4a", "aac", "wma"}
-ALL_MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
-
-def get_file_checksum(file_path):
-    try:
-        md5 = hashlib.md5()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
-                md5.update(chunk)
-        return md5.hexdigest()
-    except Exception:
-        return None

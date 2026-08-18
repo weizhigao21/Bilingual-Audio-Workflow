@@ -24,7 +24,6 @@ from .audio_utils import (
     replace_audio_in_video,
     export_with_nvenc,
     clear_mix_cache,
-    clear_voice_cache,
 )
 from .app_config import is_nvenc_available, is_cuda_available
 
@@ -158,12 +157,15 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                 original_audio, audio_files, channel_map,
                 max_workers=cfg.get("thread_count", 4)
             )
-            left = sum(1 for a in per_file_angles.values() if a < 45)
-            right = sum(1 for a in per_file_angles.values() if a > 135)
-            center = len(per_file_angles) - left - right
+            # 左/右指配音摆放的声相（θ<45°→偏左，θ>135°→偏右），并非原人声所在声道。
+            # 增益 left=cos(θ/2)、right=sin(θ/2)。channel_map 默认把原音在左→配音放右(155°)、
+            # 原音在右→配音放左(25°)，故统计的“偏左”通常对应原音偏右。
+            pan_left = sum(1 for a in per_file_angles.values() if a < 45)
+            pan_right = sum(1 for a in per_file_angles.values() if a > 135)
+            pan_center = len(per_file_angles) - pan_left - pan_right
             _log(
-                f"[音频混音] 声道检测: 左{left} 中{center} 右{right}"
-                f" (共{len(per_file_angles)})"
+                f"[音频混音] 配音声相: 偏左{pan_left} 居中{pan_center} 偏右{pan_right}"
+                f" (共{len(per_file_angles)}，原音一般放对侧)"
             )
             _progress(30)
 
@@ -417,5 +419,4 @@ class MixerBatchWorker(QThread):
             f"[音频混音批量] 完成: 成功 {success_count}, 失败 {fail_count}"
         )
         clear_mix_cache()
-        clear_voice_cache()
         self.finished_signal.emit(success_count, fail_count)

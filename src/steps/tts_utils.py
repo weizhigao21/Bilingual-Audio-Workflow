@@ -2,7 +2,6 @@ import os
 import re
 import time
 import ctypes
-import hashlib
 import requests
 import shutil
 import asyncio
@@ -257,30 +256,24 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
             error_msg = res_data.get('msg', '无返回URL')
             logger.warning(f"批量API无返回URL: {error_msg}, 回退到逐条模式")
             for i in uncached_indices:
-                idx, timestamp, text, save_dir = tasks[i]
-                success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache)
+                idx, timestamp, text, save_dir, file_mtime = tasks[i]
+                success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime))
                 results[i] = (success, msg)
     except requests.exceptions.ConnectionError:
         logger.error(f"批量API连接失败: {api_endpoint}, 回退到逐条模式")
         for i, task in zip(uncached_indices, uncached_tasks):
-            idx, timestamp, text, save_dir = task
-            success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache)
+            idx, timestamp, text, save_dir, file_mtime = task
+            success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime))
             results[i] = (success, msg)
     except Exception as e:
         logger.error(f"批量API异常: {e}", exc_info=True)
         for i, task in zip(uncached_indices, uncached_tasks):
-            idx, timestamp, text, save_dir = task
+            idx, timestamp, text, save_dir, file_mtime = task
             save_path = generate_filename(idx, timestamp, text, save_dir)
             file_name = os.path.basename(save_path)
             results[i] = (False, f"批量异常: {file_name} - {str(e)}")
 
     return results
-
-
-def calculate_task_id(lrc_files):
-    file_names = sorted([os.path.basename(f) for f in lrc_files])
-    md5_hash = hashlib.md5("".join(file_names).encode("utf-8")).hexdigest()
-    return md5_hash[:8]
 
 
 async def _edge_tts_generate(text, voice, rate, volume, save_path):

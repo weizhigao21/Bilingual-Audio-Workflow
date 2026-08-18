@@ -61,6 +61,7 @@
     "add_suffix": false,
     "skip_existing": true,
     "output_folder": "",
+    "output_folder_prefix": false,
     "thread_count": 3,
     "enable_batch_parallel": true,
     "folder_prefix": true,

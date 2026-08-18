@@ -90,12 +90,6 @@ class TaskInfo:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "TaskInfo":
-        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in d.items() if k in valid_fields}
-        return cls(**filtered)
-
     def save(self):
         """将任务状态持久化到 task.json。"""
         task_dir = self.task_dir

@@ -16,6 +16,19 @@ from ..config import WorkflowConfig
 from ..task_manager import TaskInfo
 
 
+def _decode_console_line(b):
+    """按行解码子进程输出：优先 utf-8，失败退回 gbk，避免 Windows 下中文乱码。"""
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return b.decode("gbk", errors="replace")
+    except (UnicodeError, ValueError):
+        pass
+    return b.decode("utf-8", errors="replace")
+
+
 class WhisperWorker(QThread):
     """字幕提取工作线程。"""
     log_signal = pyqtSignal(str)
@@ -109,13 +122,11 @@ class WhisperWorker(QThread):
         # 创建标志：CREATE_NO_WINDOW 避免弹出控制台窗口
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
+        # 以二进制读取 stdout，逐行用 utf-8/gbk 兜底解码，避免中文乱码
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             cwd=whisper_dir,
             creationflags=creationflags,
             bufsize=1,
@@ -127,10 +138,10 @@ class WhisperWorker(QThread):
             re.compile(r"(\d+)/(\d+)"),                 # "45/100"
         ]
 
-        for line in self._process.stdout:
+        for raw in self._process.stdout:
             if self._stop_flag:
                 break
-            line = line.rstrip()
+            line = _decode_console_line(raw).rstrip()
             if not line:
                 continue
             self.log_signal.emit(line)
@@ -218,6 +229,7 @@ class WhisperBatchWorker(QThread):
         self.config = config
         self._stop_flag = False
         self._process = None
+        self._reported = {}  # task_id -> ok，用于去重，避免同一任务被重复上报
 
     def stop(self):
         self._stop_flag = True
@@ -227,23 +239,35 @@ class WhisperBatchWorker(QThread):
             except Exception:
                 pass
 
+    def _report(self, task_id, ok, msg):
+        """上报单个任务结果；已上报过的任务忽略，避免重复。"""
+        if task_id in self._reported:
+            return
+        self._reported[task_id] = ok
+        self.task_result_signal.emit(task_id, ok, msg)
+
+    def _finish_stats(self):
+        """根据已上报结果统计成功/失败数。"""
+        ok_count = sum(1 for ok in self._reported.values() if ok)
+        return ok_count, len(self._reported) - ok_count
+
     def run(self):
         try:
             self._run_impl()
         except Exception as e:
             self.log_signal.emit(f"[字幕批量] 异常: {e}")
-            # 所有未完成任务标记失败
+            # 仅对尚未上报的任务标记失败，避免与已正常上报的任务重复
             for task in self.tasks:
-                self.task_result_signal.emit(task.task_id, False, str(e))
-            self.finished_signal.emit(0, len(self.tasks))
+                self._report(task.task_id, False, str(e))
+            self.finished_signal.emit(*self._finish_stats())
 
     def _run_impl(self):
         whisper_dir = self.config.whisper_dir
         infer_exe = os.path.join(whisper_dir, "infer.exe")
         if not os.path.exists(infer_exe):
             for task in self.tasks:
-                self.task_result_signal.emit(task.task_id, False, f"找不到 infer.exe: {infer_exe}")
-            self.finished_signal.emit(0, len(self.tasks))
+                self._report(task.task_id, False, f"找不到 infer.exe: {infer_exe}")
+            self.finished_signal.emit(*self._finish_stats())
             return
 
         cfg = self.config.whisper_cfg
@@ -252,153 +276,148 @@ class WhisperBatchWorker(QThread):
         tmp_output = tempfile.mkdtemp(prefix="whisper_batch_")
         self.log_signal.emit(f"[字幕批量] 临时输出目录: {tmp_output}")
 
-        # 构建命令行
-        cmd = [
-            infer_exe,
-            "--output_dir", tmp_output,
-            "--sub_formats", cfg.get("sub_formats", "lrc"),
-            "--audio_suffixes", cfg.get("audio_suffixes", "wav,flac,mp3,mp4,mkv,avi,mov"),
-            "--device", cfg.get("device", "auto"),
-            "--compute_type", cfg.get("compute_type", "auto"),
-            "--vad_threshold", str(cfg.get("vad_threshold", 0.5)),
-            "--vad_min_silence_duration_ms", str(cfg.get("vad_min_silence_duration_ms", 500)),
-            "--vad_min_speech_duration_ms", str(cfg.get("vad_min_speech_duration_ms", 0)),
-            "--vad_speech_pad_ms", str(cfg.get("vad_speech_pad_ms", 400)),
-            "--enable_batching",
-        ]
-        if cfg.get("overwrite", False):
-            cmd.append("--overwrite")
-        # 合并段落
-        if cfg.get("merge_segments", True):
-            cmd.append("--merge_segments")
-            cmd.append("--merge_max_gap_ms")
-            cmd.append(str(cfg.get("merge_max_gap_ms", 300)))
-            cmd.append("--merge_max_duration_ms")
-            cmd.append(str(cfg.get("merge_max_duration_ms", 30000)))
-        else:
-            cmd.append("--no_merge_segments")
-
-        # 以文件夹作为输入：文件夹导入的任务传拖入的文件夹，否则传文件所在目录。
-        # infer.exe 自动扫描文件夹中的音频，避免逐个文件处理。
-        folder_set = {}
+        # 按输入文件夹分组。每个文件夹使用独立的输出子目录，避免不同文件夹下
+        # 同名文件（如都叫 01.mp4）的字幕在平铺目录里互相覆盖或误匹配。
+        groups = {}
         for t in self.tasks:
             folder = (t.import_folder if t.from_folder and t.import_folder
                       else os.path.dirname(t.source_path))
-            folder_set[folder] = True
-        input_dirs = list(folder_set.keys())
-        cmd.extend(input_dirs)
-
-        self.log_signal.emit(
-            f"[字幕批量] 启动: {len(input_dirs)} 个文件夹, "
-            f"设备={cfg.get('device', 'auto')}, 精度={cfg.get('compute_type', 'auto')}"
-        )
-        for d in input_dirs:
-            self.log_signal.emit(f"[字幕批量]   - {d}")
+            groups.setdefault(folder, []).append(t)
 
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=whisper_dir,
-            creationflags=creationflags,
-            bufsize=1,
-        )
-
-        # 解析进度
         progress_patterns = [
             re.compile(r"(\d+(?:\.\d+)?)%"),
             re.compile(r"(\d+)/(\d+)"),
         ]
 
-        for line in self._process.stdout:
-            if self._stop_flag:
-                break
-            line = line.rstrip()
-            if not line:
-                continue
-            self.log_signal.emit(line)
-            for pat in progress_patterns:
-                m = pat.search(line)
-                if m:
-                    try:
-                        if pat.groups == 2:
-                            cur, total = int(m.group(1)), int(m.group(2))
-                            if total > 0:
-                                pct = int(cur * 100 / total)
-                                self.progress_signal.emit(min(pct, 99))
-                        else:
-                            pct = int(float(m.group(1)))
-                            self.progress_signal.emit(min(pct, 99))
-                        break
-                    except (ValueError, ZeroDivisionError):
-                        pass
+        for gi, (folder, group_tasks) in enumerate(groups.items()):
+            out_dir = os.path.join(tmp_output, str(gi))
+            os.makedirs(out_dir, exist_ok=True)
 
-        self._process.wait()
-        ret = self._process.returncode
+            # 构建命令行（infer.exe 自动扫描输入文件夹中的音频）
+            cmd = [
+                infer_exe,
+                "--output_dir", out_dir,
+                "--sub_formats", cfg.get("sub_formats", "lrc"),
+                "--audio_suffixes", cfg.get("audio_suffixes", "wav,flac,mp3,mp4,mkv,avi,mov"),
+                "--device", cfg.get("device", "auto"),
+                "--compute_type", cfg.get("compute_type", "auto"),
+                "--vad_threshold", str(cfg.get("vad_threshold", 0.5)),
+                "--vad_min_silence_duration_ms", str(cfg.get("vad_min_silence_duration_ms", 500)),
+                "--vad_min_speech_duration_ms", str(cfg.get("vad_min_speech_duration_ms", 0)),
+                "--vad_speech_pad_ms", str(cfg.get("vad_speech_pad_ms", 400)),
+                "--enable_batching",
+            ]
+            if cfg.get("overwrite", False):
+                cmd.append("--overwrite")
+            # 合并段落
+            if cfg.get("merge_segments", True):
+                cmd.extend([
+                    "--merge_segments",
+                    "--merge_max_gap_ms", str(cfg.get("merge_max_gap_ms", 300)),
+                    "--merge_max_duration_ms", str(cfg.get("merge_max_duration_ms", 30000)),
+                ])
+            else:
+                cmd.append("--no_merge_segments")
+            cmd.append(folder)
 
-        if self._stop_flag:
-            self.log_signal.emit("[字幕批量] 已中止")
-            for task in self.tasks:
-                self.task_result_signal.emit(task.task_id, False, "用户中止")
-            self.finished_signal.emit(0, len(self.tasks))
-            shutil.rmtree(tmp_output, ignore_errors=True)
-            return
+            self.log_signal.emit(
+                f"[字幕批量] 启动({gi + 1}/{len(groups)}): {folder}, "
+                f"设备={cfg.get('device', 'auto')}, 精度={cfg.get('compute_type', 'auto')}"
+            )
 
-        if ret != 0:
-            self.log_signal.emit(f"[字幕批量] infer.exe 退出码: {ret}")
-            for task in self.tasks:
-                self.task_result_signal.emit(task.task_id, False, f"infer.exe 退出码: {ret}")
-            self.finished_signal.emit(0, len(self.tasks))
-            shutil.rmtree(tmp_output, ignore_errors=True)
-            return
+            # 以二进制读取 stdout，逐行用 utf-8/gbk 兜底解码，避免中文乱码
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=whisper_dir,
+                creationflags=creationflags,
+                bufsize=1,
+            )
 
-        # 扫描临时目录，把字幕文件分配到各任务
-        sub_formats = [f.strip() for f in cfg.get("sub_formats", "lrc").split(",") if f.strip()]
-        tmp_files = os.listdir(tmp_output)
-
-        success_count = 0
-        fail_count = 0
-
-        for task in self.tasks:
-            found_sub = ""
-            # 先精确匹配 source_name
-            for fmt in sub_formats:
-                expected = os.path.join(tmp_output, f"{task.source_name}.{fmt}")
-                if os.path.exists(expected):
-                    found_sub = expected
+            # 解析进度
+            for raw in self._process.stdout:
+                if self._stop_flag:
                     break
-            # 模糊匹配
-            if not found_sub:
-                for f in tmp_files:
-                    for fmt in sub_formats:
-                        if f.endswith(f".{fmt}") and task.source_name in f:
-                            found_sub = os.path.join(tmp_output, f)
+                line = _decode_console_line(raw).rstrip()
+                if not line:
+                    continue
+                self.log_signal.emit(line)
+                for pat in progress_patterns:
+                    m = pat.search(line)
+                    if m:
+                        try:
+                            if pat.groups == 2:
+                                cur, total = int(m.group(1)), int(m.group(2))
+                                if total > 0:
+                                    pct = int(cur * 100 / total)
+                                    self.progress_signal.emit(min(pct, 99))
+                            else:
+                                pct = int(float(m.group(1)))
+                                self.progress_signal.emit(min(pct, 99))
                             break
-                    if found_sub:
-                        break
+                        except (ValueError, ZeroDivisionError):
+                            pass
 
-            if not found_sub:
-                self.task_result_signal.emit(task.task_id, False, "未找到输出字幕文件")
-                fail_count += 1
+            self._process.wait()
+            ret = self._process.returncode
+
+            if self._stop_flag:
+                self.log_signal.emit("[字幕批量] 已中止")
+                for task in group_tasks:
+                    self._report(task.task_id, False, "用户中止")
+                self.finished_signal.emit(*self._finish_stats())
+                shutil.rmtree(tmp_output, ignore_errors=True)
+                return
+
+            if ret != 0:
+                self.log_signal.emit(f"[字幕批量] {folder} infer.exe 退出码: {ret}")
+                for task in group_tasks:
+                    self._report(task.task_id, False, f"infer.exe 退出码: {ret}")
                 continue
 
-            # 移动到源文件所在目录
-            src_dir = os.path.dirname(task.source_path)
-            dest = os.path.join(src_dir, os.path.basename(found_sub))
-            try:
-                shutil.move(found_sub, dest)
-                self.log_signal.emit(f"[字幕批量] {task.source_name} → {dest}")
-                self.task_result_signal.emit(task.task_id, True, dest)
-                success_count += 1
-            except Exception as e:
-                self.task_result_signal.emit(task.task_id, False, f"移动文件失败: {e}")
-                fail_count += 1
+            # 在该组输出子目录内匹配字幕（组内文件名唯一，无跨文件夹冲突）
+            sub_formats = [f.strip() for f in cfg.get("sub_formats", "lrc").split(",") if f.strip()]
+            out_files = os.listdir(out_dir)
 
+            for task in group_tasks:
+                found_sub = ""
+                # 先精确匹配 source_name
+                for fmt in sub_formats:
+                    expected = os.path.join(out_dir, f"{task.source_name}.{fmt}")
+                    if os.path.exists(expected):
+                        found_sub = expected
+                        break
+                # 模糊匹配
+                if not found_sub:
+                    for f in out_files:
+                        if any(f.endswith(f".{fmt}") and task.source_name in f for fmt in sub_formats):
+                            found_sub = os.path.join(out_dir, f)
+                            break
+
+                if not found_sub:
+                    self._report(task.task_id, False, "未找到输出字幕文件")
+                    continue
+
+                # 移动到源文件所在目录
+                src_dir = os.path.dirname(task.source_path)
+                dest = os.path.join(src_dir, os.path.basename(found_sub))
+                try:
+                    shutil.move(found_sub, dest)
+                    self.log_signal.emit(f"[字幕批量] {task.source_name} → {dest}")
+                    self._report(task.task_id, True, dest)
+                except Exception as e:
+                    self._report(task.task_id, False, f"移动文件失败: {e}")
+
+            if self._stop_flag:
+                self.log_signal.emit("[字幕批量] 已中止")
+                self.finished_signal.emit(*self._finish_stats())
+                shutil.rmtree(tmp_output, ignore_errors=True)
+                return
+
+        s, f = self._finish_stats()
         self.progress_signal.emit(100)
-        self.log_signal.emit(f"[字幕批量] 完成: 成功 {success_count}, 失败 {fail_count}")
-        self.finished_signal.emit(success_count, fail_count)
+        self.log_signal.emit(f"[字幕批量] 完成: 成功 {s}, 失败 {f}")
+        self.finished_signal.emit(s, f)
         shutil.rmtree(tmp_output, ignore_errors=True)

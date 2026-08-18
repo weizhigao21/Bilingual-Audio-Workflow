@@ -98,7 +98,7 @@ class TTSWorker(QThread):
                 try:
                     with open(lrc_path, "r", encoding="utf-8") as f:
                         lines = f.readlines()
-                except:
+                except Exception:
                     try:
                         with open(lrc_path, "r", encoding="gbk") as f:
                             lines = f.readlines()

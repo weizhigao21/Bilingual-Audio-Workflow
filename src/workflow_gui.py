@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v2.0.3")
+        self.setWindowTitle("双语音声工作流 v2.0.4")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -181,10 +181,6 @@ class WorkflowMainWindow(QMainWindow):
         self.task_queue.current_changed.connect(self._on_current_changed)
         self.task_queue.group_added.connect(self.task_list.add_group_item)
         self.task_queue.group_removed.connect(self.task_list.remove_group_item)
-
-    def _restore_task_list(self):
-        """（已废弃）启动时任务列表为空，需手动添加文件。"""
-        pass
 
     # ========== 工具栏动作 ==========
     def _on_add_files(self):
@@ -931,9 +927,8 @@ class WorkflowMainWindow(QMainWindow):
         self.task_queue.update_task(task)
         self._refresh_step_panels(task)
         if step == 3:
-            from .steps.audio_utils import clear_mix_cache, clear_voice_cache
+            from .steps.audio_utils import clear_mix_cache
             clear_mix_cache()
-            clear_voice_cache()
 
     def _rename_source_folder(self, task: TaskInfo):
         """混音完成后，将拖入的源文件夹重命名，添加\"双语-\"前缀。
