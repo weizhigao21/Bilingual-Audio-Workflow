@@ -31,7 +31,7 @@ class WorkflowMainWindow(QMainWindow):
     def __init__(self, config: WorkflowConfig):
         super().__init__()
         self.config = config
-        self.setWindowTitle("双语音声工作流 v2.0.4")
+        self.setWindowTitle("双语音声工作流 v2.1.0")
         self.setMinimumSize(1100, 720)
 
         # 任务队列
@@ -600,6 +600,7 @@ class WorkflowMainWindow(QMainWindow):
         self._batch_executor.log_signal.connect(self._append_log)
         self._batch_executor.progress_signal.connect(self._on_batch_progress)
         self._batch_executor.step_progress_signal.connect(self._on_step_progress)
+        self._batch_executor.step_status_signal.connect(self._on_step_status)
         self._batch_executor.step_total_signal.connect(self._on_step_total)
         self._batch_executor.task_started.connect(self._on_batch_task_started)
         self._batch_executor.task_finished.connect(self._on_batch_task_finished)
@@ -821,6 +822,9 @@ class WorkflowMainWindow(QMainWindow):
             worker = TTSBridgeWorker(task, self.config)
             self._tts_total = 0
             worker.total_signal.connect(self._on_tts_total)
+            worker.status_signal.connect(
+                lambda text, s=step: self._on_step_status(s, text)
+            )
         else:
             worker = MixerWorker(task, self.config)
 
@@ -904,6 +908,11 @@ class WorkflowMainWindow(QMainWindow):
         panel = self.step_panels[step]
         panel.progress.setRange(0, 100)
         panel.progress.setValue(max(0, min(100, value)))
+
+    def _on_step_status(self, step: int, text: str):
+        """步骤内状态文本显示在进度条上（如"混音中 2/4 · 当前 xx.mp3"）。"""
+        panel = self.step_panels[step]
+        panel.progress.setFormat(f"{text}  |  %p%")
 
     def _on_step_total(self, step: int, total: int):
         """步骤内总任务数（如 TTS 的总片段数），仅记录，进度条 range 恒为 0-100。"""

@@ -49,6 +49,27 @@ def _edge_release():
         _edge_cond.notify_all()
 
 
+# Edge TTS 全局共享线程池：容量 = 全局并发上限。
+# 与声道检测 _get_pan_detect_executor 同理：流水线/多音频并行时，
+# 若每个音频各建一个 max_workers=edge_threads 的线程池，线程数会相乘叠加
+# （音频数 × 线程数），而真正并发又被全局上限卡死，造成大量线程空转。
+# 改为所有音频共用同一个池，池容量即并发上限，无叠加、负载天然均衡。
+_edge_executor = None
+_edge_executor_workers = 0
+
+
+def get_edge_executor(max_workers):
+    """返回按容量复用的共享线程池；容量变化时销毁重建（不等待旧任务）。"""
+    global _edge_executor, _edge_executor_workers
+    workers = max(1, int(max_workers))
+    if _edge_executor is None or _edge_executor_workers != workers:
+        if _edge_executor is not None:
+            _edge_executor.shutdown(wait=False)
+        _edge_executor = ThreadPoolExecutor(max_workers=workers)
+        _edge_executor_workers = workers
+    return _edge_executor
+
+
 def set_sleep_mode(prevent=True):
     if os.name == "nt":
         try:

@@ -16,6 +16,7 @@ from .tts_utils import (
     tts_bulk_task,
     edge_tts_task,
     set_edge_max_concurrent,
+    get_edge_executor,
 )
 
 
@@ -35,8 +36,12 @@ def format_eta(seconds):
 
 class TTSWorker(QThread):
     log_signal = pyqtSignal(str)
-    progress_signal = pyqtSignal(int)
-    total_tasks_signal = pyqtSignal(int)
+    progress_signal = pyqtSignal(int)          # 已完成片段数
+    total_tasks_signal = pyqtSignal(int)       # 总片段数
+    # 按"片段文本字数"加权的进度：合成耗时与文本长度强相关，
+    # 长片段推进更多，进度条不再"短片段狂飙、长片段卡住"
+    weight_progress_signal = pyqtSignal(int)   # 已完成片段的累计字数
+    total_weight_signal = pyqtSignal(int)      # 全部片段的总字数
     finished_signal = pyqtSignal(bool)
     eta_signal = pyqtSignal(str)
 
@@ -251,7 +256,10 @@ class TTSWorker(QThread):
 
             total = len(all_tasks)
             self.total_tasks_signal.emit(total)
+            total_weight = sum(len(t[2]) for t in all_tasks)
+            self.total_weight_signal.emit(total_weight)
             completed = 0
+            completed_weight = 0
 
             pending_tasks = []
             for task in all_tasks:
@@ -259,7 +267,9 @@ class TTSWorker(QThread):
                 file_path = generate_filename(idx, timestamp, text, save_dir)
                 if os.path.exists(file_path):
                     completed += 1
+                    completed_weight += len(text)
                     self.progress_signal.emit(completed)
+                    self.weight_progress_signal.emit(completed_weight)
                     file_name = os.path.basename(file_path)
                     self.log_signal.emit(f"跳过已存在文件: {file_name}")
                 else:
@@ -349,14 +359,21 @@ class TTSWorker(QThread):
         voice = self.config.get("edge_voice", "zh-CN-XiaoxiaoNeural")
         rate = self.config.get("edge_rate", "+0%")
         volume = self.config.get("edge_volume", "+0%")
-        max_workers = self.config.get("edge_threads", 3)
 
-        # 设置 Edge TTS 全局并发上限：多个任务并行合成时，
-        # 总并发请求数不超过该值，避免触发微软服务限流
-        set_edge_max_concurrent(self.config.get("edge_max_concurrent", 8))
+        # Edge TTS 并发模型：全局共享线程池 + 请求闸门，两层解耦。
+        #   - 线程池数量(edge_threads)：同时可运行的任务数，所有音频共用同一个池，
+        #     不再每音频各建一个池，线程数不随音频数叠加。
+        #   - 全局并发上限(edge_max_concurrent)：真正发出的并发请求数上限，
+        #     由 tts_utils 的请求闸门(_edge_acquire/_edge_release)控制，
+        #     池内多余任务会在闸门排队，避免触发微软服务限流。
+        pool_workers = max(1, int(self.config.get("edge_threads", 5)))
+        global_max = max(1, int(self.config.get("edge_max_concurrent", 8)))
+        # 容量变化时按新容量重建共享池
+        executor = get_edge_executor(pool_workers)
+        set_edge_max_concurrent(global_max)
         self.log_signal.emit(
-            f"使用Edge TTS模式，声音: {voice}，线程数: {max_workers}，"
-            f"全局并发上限: {self.config.get('edge_max_concurrent', 8)}"
+            f"使用Edge TTS模式，声音: {voice}，"
+            f"共享线程池: {pool_workers}，全局并发上限: {global_max}"
         )
 
         total = len(pending_tasks)
@@ -369,44 +386,45 @@ class TTSWorker(QThread):
                 idx, timestamp, text, voice, rate, volume, save_dir, self.audio_cache, file_mtime
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for task in pending_tasks:
+        futures = {}
+        for task in pending_tasks:
+            if self.stop_flag:
+                break
+
+            while self.is_paused():
                 if self.stop_flag:
                     break
+                time.sleep(0.1)
 
-                while self.is_paused():
-                    if self.stop_flag:
-                        break
-                    time.sleep(0.1)
+            if self.stop_flag:
+                break
 
-                if self.stop_flag:
-                    break
+            future = executor.submit(process_task, task)
+            futures[future] = task
 
-                future = executor.submit(process_task, task)
-                futures[future] = task
+        for future in concurrent.futures.as_completed(futures):
+            if self.stop_flag:
+                break
 
-            for future in concurrent.futures.as_completed(futures):
-                if self.stop_flag:
-                    break
+            task = futures[future]
+            try:
+                success, msg = future.result()
+                self.log_signal.emit(msg)
+            except Exception as e:
+                self.log_signal.emit(f"异常: {task[2][:10]}... - {e}")
 
-                try:
-                    success, msg = future.result()
-                    self.log_signal.emit(msg)
-                except Exception as e:
-                    task = futures[future]
-                    self.log_signal.emit(f"异常: {task[2][:10]}... - {e}")
+            with progress_lock:
+                completed += 1
+                completed_weight += len(task[2])
+                pending_completed += 1
+                self.progress_signal.emit(completed)
+                self.weight_progress_signal.emit(completed_weight)
 
-                with progress_lock:
-                    completed += 1
-                    pending_completed += 1
-                    self.progress_signal.emit(completed)
-
-                    elapsed = time.time() - start_time
-                    if pending_completed > 0:
-                        avg_time = elapsed / pending_completed
-                        remaining = avg_time * (total - pending_completed)
-                        self.eta_signal.emit(format_eta(remaining))
+                elapsed = time.time() - start_time
+                if pending_completed > 0:
+                    avg_time = elapsed / pending_completed
+                    remaining = avg_time * (total - pending_completed)
+                    self.eta_signal.emit(format_eta(remaining))
 
         self.log_signal.emit("全部任务完成")
         self.log_signal.emit(f"任务ID: {task_id}")
@@ -531,8 +549,10 @@ class TTSWorker(QThread):
 
                     with progress_lock:
                         completed += len(batch)
+                        completed_weight += sum(len(t[2]) for t in batch)
                         pending_completed += len(batch)
                         self.progress_signal.emit(completed)
+                        self.weight_progress_signal.emit(completed_weight)
                         elapsed = time.time() - start_time
                         if pending_completed > 0 and total > 0:
                             avg_time = elapsed / pending_completed

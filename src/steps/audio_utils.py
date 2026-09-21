@@ -130,18 +130,19 @@ def _analyze_channel_energy(signal, sample_rate):
     hop_len = 1024
     voice_lo, voice_hi = 85, 3000
 
-    total_energy = 0.0
+    if len(signal) <= frame_len:
+        return 0.0
 
-    for start in range(0, len(signal) - frame_len, hop_len):
-        frame = signal[start:start + frame_len]
-        window = np.hanning(frame_len)
-        fft = np.abs(np.fft.rfft(frame * window))
-        freqs = np.fft.rfftfreq(frame_len, 1.0 / sample_rate)
+    # 向量化：滑动窗口一次取出全部帧，批量 rfft，避免逐帧 Python 循环
+    # （每片段上百次 FFT 调用 → 单次二维 FFT，声道检测可提速一个数量级）
+    n_frames = (len(signal) - frame_len) // hop_len + 1
+    window = np.hanning(frame_len)
+    frames = np.lib.stride_tricks.sliding_window_view(signal, frame_len)[::hop_len]
+    fft = np.abs(np.fft.rfft(frames * window, axis=1))
+    freqs = np.fft.rfftfreq(frame_len, 1.0 / sample_rate)
 
-        voice_mask = (freqs >= voice_lo) & (freqs <= voice_hi)
-        total_energy += np.sum(fft[voice_mask] ** 2)
-
-    return total_energy
+    voice_mask = (freqs >= voice_lo) & (freqs <= voice_hi)
+    return float(np.sum(fft[:, voice_mask] ** 2))
 
 
 def detect_voice_onset(audio_segment, energy_threshold_ratio=0.02, min_onset_ms=10):
@@ -623,6 +624,16 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
 
             mix_chunk = mix_raw[:mix_len]
 
+            # 片段边界淡入淡出：消除叠加到原音频时的波形阶跃（爆音/咔哒声）。
+            # 起始对齐可能从非零采样点裁入、片段结尾也可能是非零采样，
+            # 硬切会在边界形成阶跃，听感即为"突然出现的短促杂音"。
+            # 5ms 淡入 + 15ms 淡出，短到几乎无听感损失，足以抹平阶跃。
+            n_fade_in = min(int(0.005 * frame_rate), max(1, mix_len // 3))
+            n_fade_out = min(int(0.015 * frame_rate), max(1, mix_len // 3))
+            if n_fade_in + n_fade_out <= mix_len:
+                mix_chunk[:n_fade_in] *= np.linspace(0.0, 1.0, n_fade_in)
+                mix_chunk[-n_fade_out:] *= np.linspace(1.0, 0.0, n_fade_out)
+
             angle_rad = angle * math.pi / 180.0
             left_gain = math.cos(angle_rad / 2.0)
             right_gain = math.sin(angle_rad / 2.0)
@@ -770,12 +781,15 @@ def extract_audio_from_video(video_path, stop_check=None):
 def replace_audio_in_video(video_path, audio_path, output_path,
                            bitrate="192k", sample_rate=44100, channels=2,
                            stop_check=None):
+    # 2080 Ti 等 NVIDIA 卡支持 aac_nvenc 硬件编码，导出视频音轨时
+    # 比 CPU aac 编码更快；不可用时回退到软件 aac。
+    audio_codec = "aac_nvenc" if is_aac_nvenc_available() else "aac"
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", video_path,
         "-i", audio_path,
         "-c:v", "copy",
-        "-c:a", "aac", "-b:a", bitrate,
+        "-c:a", audio_codec, "-b:a", bitrate,
         "-ar", str(sample_rate), "-ac", str(channels),
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest",

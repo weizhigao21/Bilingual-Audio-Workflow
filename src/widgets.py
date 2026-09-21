@@ -100,6 +100,7 @@ class StepPanel(QFrame):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
         layout.addWidget(self.progress)
 
         # 输出路径
@@ -473,9 +474,14 @@ class TTSConfigPanel(QGroupBox):
         self.volume_combo.editTextChanged.connect(self._save)
         edge_layout.addWidget(self.volume_combo, 2, 1)
 
-        edge_layout.addWidget(QLabel("线程数:"), 3, 0)
+        edge_layout.addWidget(QLabel("线程池数量:"), 3, 0)
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(1, 20)
+        self.threads_spin.setToolTip(
+            "Edge 模式全局共享线程池的线程数（所有音频共用同一个池，\n"
+            "不随音频数叠加）。同时可运行的任务数。\n"
+            "实际发出的请求数另由「全局并发上限」闸门控制。"
+        )
         self.threads_spin.valueChanged.connect(self._save)
         edge_layout.addWidget(self.threads_spin, 3, 1)
 
@@ -483,8 +489,9 @@ class TTSConfigPanel(QGroupBox):
         self.max_concurrent_spin = QSpinBox()
         self.max_concurrent_spin.setRange(1, 20)
         self.max_concurrent_spin.setToolTip(
-            "多个任务并行合成时（如流水线模式）的总并发请求数上限。\n"
-            "过高会触发微软服务限流（Cannot connect to ...bing.com:443），建议 5-8"
+            "Edge 模式真正发出的并发请求数上限（请求闸门）。\n"
+            "超过线程池数量的任务会在闸门排队。过高会触发微软服务限流\n"
+            "（Cannot connect to ...bing.com:443），建议 5-8"
         )
         self.max_concurrent_spin.valueChanged.connect(self._save)
         edge_layout.addWidget(self.max_concurrent_spin, 4, 1)
@@ -495,7 +502,7 @@ class TTSConfigPanel(QGroupBox):
         self.pipeline_tts_spin.setToolTip(
             "流水线模式下同时进行语音生成的音频数（任务级并行）。\n"
             "设 1 = 按音频逐个生成语音；2 = 最多 2 个音频同时生成。\n"
-            "「线程数」控制单个音频内部的片段并发。"
+            "片段级并发由「全局并发上限」统一控制（共享线程池，不叠加）。"
         )
         self.pipeline_tts_spin.valueChanged.connect(self._save)
         edge_layout.addWidget(self.pipeline_tts_spin, 5, 1)

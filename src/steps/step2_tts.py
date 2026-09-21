@@ -16,8 +16,9 @@ class TTSBridgeWorker(QThread):
     内部持有 TTS 项目的 TTSWorker 实例，转发其信号到主控。
     """
     log_signal = pyqtSignal(str)
-    progress_signal = pyqtSignal(int)         # 当前已完成数
-    total_signal = pyqtSignal(int)            # 总任务数
+    progress_signal = pyqtSignal(int)         # 0-100 百分比
+    total_signal = pyqtSignal(int)            # 总片段数
+    status_signal = pyqtSignal(str)           # 状态文本（片段 x/N · 剩余时间）
     eta_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)   # (success, output_dir_or_error)
 
@@ -26,7 +27,11 @@ class TTSBridgeWorker(QThread):
         self.task = task
         self.config = config
         self._tts_worker = None
-        self._total = 0
+        self._total = 0          # 总片段数
+        self._done_count = 0     # 已完成片段数（含跳过）
+        self._total_weight = 0   # 全部片段总字数
+        self._weight_done = 0    # 已完成片段的累计字数
+        self._eta_text = "计算中..."
         # 同步结果：(success, output_dir_or_error)，供流水线模式 wait() 后读取
         self.result = (False, "未执行")
 
@@ -93,8 +98,7 @@ class TTSBridgeWorker(QThread):
             self.log_signal.emit(f"[语音生成] 声音: {tts_config['edge_voice']}")
             self.log_signal.emit(
                 f"[语音生成] 语速={tts_config['edge_rate']}, "
-                f"音量={tts_config['edge_volume']}, "
-                f"线程={tts_config['edge_threads']}"
+                f"音量={tts_config['edge_volume']}"
             )
         else:
             idx = tts_config["current_api_index"]
@@ -119,7 +123,14 @@ class TTSBridgeWorker(QThread):
         self._tts_worker.total_tasks_signal.connect(
             self._on_total, Qt.ConnectionType.DirectConnection
         )
-        self._tts_worker.eta_signal.connect(self.eta_signal.emit)
+        # 字数加权进度：长片段推进更多，进度条更贴近真实耗时
+        self._tts_worker.weight_progress_signal.connect(
+            self._on_weight_progress, Qt.ConnectionType.DirectConnection
+        )
+        self._tts_worker.total_weight_signal.connect(
+            self._on_total_weight, Qt.ConnectionType.DirectConnection
+        )
+        self._tts_worker.eta_signal.connect(self._on_eta)
         self._tts_worker.finished_signal.connect(
             self._on_finished, Qt.ConnectionType.DirectConnection
         )
@@ -136,19 +147,36 @@ class TTSBridgeWorker(QThread):
         self._total = total
         self.total_signal.emit(total)
 
-    def _on_progress(self, completed: int):
-        """把 TTSWorker 的"已完成片段数"归一化为 0-100 百分比。
+    def _on_total_weight(self, total_weight: int):
+        self._total_weight = total_weight
 
-        completed 可能从"已存在跳过的文件数"起步（TTSWorker 内部语义），
-        total 是全部片段数（含已跳过），因此起点即为真实已完成比例，
-        之后随合成进度单调递增到 100。
-        """
-        total = self._total
-        if total > 0:
-            pct = min(100, max(0, int(completed * 100 / total)))
+    def _emit_pct_and_status(self):
+        """计算 0-100 百分比（优先按字数加权）并连同状态文本一起发出。"""
+        if self._total_weight > 0:
+            pct = int(self._weight_done * 100 / self._total_weight)
+        elif self._total > 0:
+            pct = int(self._done_count * 100 / self._total)
         else:
-            pct = completed  # total 未就绪时的兜底，保持原值
+            pct = 0
+        pct = min(100, max(0, pct))
         self.progress_signal.emit(pct)
+        self.status_signal.emit(
+            f"片段 {self._done_count}/{self._total} · 剩余 {self._eta_text}"
+        )
+
+    def _on_progress(self, completed: int):
+        """记录已完成片段数并更新进度（字数加权可用时优先）。"""
+        self._done_count = completed
+        self._emit_pct_and_status()
+
+    def _on_weight_progress(self, weight: int):
+        self._weight_done = weight
+        self._emit_pct_and_status()
+
+    def _on_eta(self, text: str):
+        self._eta_text = text
+        self.eta_signal.emit(text)
+        self._emit_pct_and_status()
 
     def _on_finished(self, success: bool):
         """TTSWorker 完成回调。"""

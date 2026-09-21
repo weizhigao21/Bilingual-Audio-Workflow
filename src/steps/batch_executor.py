@@ -8,7 +8,7 @@
     - "by_task"    按任务：每个任务依次跑完所有步骤，再跑下一个任务
     - "by_step"    按步骤：先把所有任务的step1跑完，再跑step2，再step3
     - "pipeline"   流水线：字幕先全部完成，然后语音生成与混音交错并行
-                   （语音队列并行度=edge_threads，混音队列并行度可配，默认1）
+                   （语音队列并行度=音频级并行，混音队列并行度可配，默认1）
 """
 import os
 import queue
@@ -29,6 +29,8 @@ class BatchExecutor(QThread):
     progress_signal = pyqtSignal(int, int, int)
     # (step, progress 0-100) — 步骤内进度，用于更新对应步骤面板的进度条
     step_progress_signal = pyqtSignal(int, int)
+    # (step, status_text) — 步骤内状态文本（如"混音中 x/N · 当前 xx.mp3"）
+    step_status_signal = pyqtSignal(int, str)
     # (step, total) — 步骤内总任务数（如 TTS 的总片段数），用于设置进度条上限
     step_total_signal = pyqtSignal(int, int)
     log_signal = pyqtSignal(str)
@@ -443,6 +445,10 @@ class BatchExecutor(QThread):
         worker.progress_signal.connect(
             lambda v: self.step_progress_signal.emit(3, v)
         )
+        # 状态文本（当前混音任务名等）转发到 GUI 显示
+        worker.status_signal.connect(
+            lambda text: self.step_status_signal.emit(3, text)
+        )
         worker.task_result_signal.connect(on_task_result)
         worker.finished_signal.connect(on_finished)
 
@@ -494,6 +500,11 @@ class BatchExecutor(QThread):
                 self.step_progress_signal.emit(step, max(0, min(100, mapped)))
 
         worker.progress_signal.connect(on_progress)
+        # TTS 步骤有状态文本（片段 x/N · 剩余时间），转发到步骤面板进度条
+        if hasattr(worker, 'status_signal'):
+            worker.status_signal.connect(
+                lambda text, s=step: self.step_status_signal.emit(s, text)
+            )
         # TTS 步骤有 total_signal（片段总数），转发仅用于记录/日志展示。
         # 进度条 range 已统一为 0-100，不再依赖片段总数。
         if hasattr(worker, 'total_signal'):
@@ -545,6 +556,11 @@ class BatchExecutor(QThread):
             self.step_progress_signal.emit(step, max(0, min(100, mapped)))
 
         worker.progress_signal.connect(on_progress)
+        # TTS 步骤有状态文本（片段 x/N · 剩余时间），转发到步骤面板进度条
+        if hasattr(worker, 'status_signal'):
+            worker.status_signal.connect(
+                lambda text, s=step: self.step_status_signal.emit(s, text)
+            )
 
         self._track_worker(worker, True)
         worker.start()
@@ -627,8 +643,8 @@ class BatchExecutor(QThread):
             pass
         else:
             # 任务级语音并行 = 同时生成语音的"音频数"（独立配置，默认 2），
-            # 与任务内片段并发(edge_threads)分开，避免多个音频同时全速生成
-            # 导致日志混杂、触发 Edge 限流
+            # 与片段级并发（Edge 全局共享线程池/并发上限）分开，
+            # 避免多个音频同时全速生成导致日志混杂、触发 Edge 限流
             tts_workers = max(
                 1, int(self.config.tts_cfg.get("pipeline_tts_workers", 2))
             )
