@@ -132,6 +132,7 @@ pyinstaller 双语音声工作流.spec
 │   ├── task_manager.py         # 任务模型与队列
 │   ├── workflow_gui.py         # 主窗口
 │   ├── widgets.py              # UI 组件
+│   ├── crash_log.py            # 崩溃日志兜底（异常/致命消息/faulthandler）
 │   └── steps/
 │       ├── step1_whisper.py    # 字幕提取（subprocess → infer.exe）
 │       ├── step2_tts.py        # 语音生成桥接
@@ -169,6 +170,9 @@ TTS 合成结果基于 **文本内容 + 声音模型** 进行 MD5 去重缓存�
 - **步骤2 语音进度按字数加权**：进度 = 已完成片段累计字数 / 总字数（长片段占用更多进度），进度条推进速度与真实耗时一致，不再"短片段狂飙、长片段卡住"；进度条实时显示"片段 x/N · 剩余预计时间"（ETA 此前已在计算但未展示）
 - **步骤3 批量混音进度平滑显示**：4 路并行混音时进度条不再长时间停在 0，总进度 = 各任务内部阶段进度的平均值；进度条实时显示"混音中 x/N · 当前 xx.mp3"
 - **按当前硬件调优默认配置**：whisper 计算精度 float32 → float16（NVIDIA GPU 推理提速约 2 倍）；Edge TTS 全局并发上限 20 → 8（防微软限流重试）；流水线语音并行 1 → 2；混音并行线程 3 → 4
+- **修复步骤2 闪退**：TTS 字数进度变量未传入子函数导致 UnboundLocalError、以及 QThread 仍在运行时即被释放的原生崩溃（`QThread: Destroyed while thread is still running`）——统一改为 worker 完成后再释放
+- **崩溃日志兜底**：主线程 / 工作线程 / Qt 致命消息 / 原生崩溃（faulthandler）四层兜底，异常自动写入 `resources/logs/crash_YYYYMMDD.log`，不再无声退出
+- **混音进一步提速**：软限幅合并为单次就地计算（减少全数组扫描与中间数组，缓解 1 小时音频导出内存）；起拍检测改为滑动窗口批量 RMS；16bit 导出直接经管道喂给 ffmpeg，免临时 WAV 落盘
 
 ### v2.0.4 (2026-08-18)
 - **修复批量字幕文件命名冲突**：步骤1 批量模式按源文件夹分组，输出到各自独立子目录，避免同名文件互相覆盖

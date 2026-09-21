@@ -176,12 +176,20 @@ def detect_voice_onset(audio_segment, energy_threshold_ratio=0.02, min_onset_ms=
         if threshold < 1.0:
             threshold = 1.0
 
-        # 逐帧检测能量超过阈值的位置
-        for start in range(0, len(samples) - frame_len, hop_len):
-            frame = samples[start:start + frame_len]
-            rms = np.sqrt(np.mean(frame ** 2))
-            if rms >= threshold:
-                onset_ms = (start / sr) * 1000.0
+        # 向量化：滑动窗口批量算 RMS，直接找首个超阈值帧。
+        # 分块处理控制峰值内存（块内 frames**2 ≈ 1024*8B*32768 ≈ 268MB），
+        # 字幕片段通常只有几秒，远达不到块上限。
+        n_frames = (len(samples) - frame_len) // hop_len + 1
+        block = 1 << 15
+        for start_idx in range(0, n_frames, block):
+            end_idx = min(start_idx + block, n_frames)
+            frames = np.lib.stride_tricks.sliding_window_view(
+                samples, frame_len
+            )[start_idx * hop_len:end_idx * hop_len:hop_len]
+            rms = np.sqrt(np.mean(frames ** 2, axis=1))
+            hit = np.argmax(rms >= threshold)
+            if rms[hit] >= threshold:
+                onset_ms = ((start_idx + hit) * hop_len / sr) * 1000.0
                 return max(onset_ms, min_onset_ms)
 
         return 0
@@ -650,28 +658,25 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
 
         max_val = 2 ** (sample_width * 8 - 1) - 1
 
+        # 软限幅：融合为一次就地计算，避免 8 次全数组扫描 + 多个中间数组
+        # （1 小时音频 = 每次遍历 ~1GB，减扫描次数即减内存带宽与峰值占用）
         threshold = 0.9
-        x = stereo / max_val
-        abs_x = np.abs(x)
-        sign_x = np.sign(x)
+        stereo /= max_val                      # 就地归一化，复用原数组
+        abs_x = np.abs(stereo)
         excess = np.maximum(abs_x - threshold, 0.0) / (1.0 - threshold)
-        clipped_abs = np.where(
-            abs_x > threshold,
-            threshold + (1.0 - threshold) * np.tanh(excess),
-            abs_x,
-        )
-        stereo = sign_x * clipped_abs * max_val
-        stereo = np.clip(stereo, -max_val - 1, max_val).astype(dtype)
+        clipped = threshold + (1.0 - threshold) * np.tanh(excess)
+        # 低于阈值的保持原值（tanh(0)=0，不能把弱信号压成 ±threshold）
+        np.copyto(clipped, abs_x, where=(abs_x <= threshold))
+        del abs_x, excess                      # 及时释放中间数组
+        stereo = np.copysign(clipped, stereo) * max_val
+        del clipped
+        stereo_int = np.clip(stereo, -max_val - 1, max_val).astype(dtype)
+        del stereo
 
-        logger.debug(f"[混音] result max={np.max(np.abs(stereo))}, 形状={stereo.shape}")
-
-        interleaved = np.empty(total_frames * 2, dtype=dtype)
-        interleaved[0::2] = stereo[:, 0]
-        interleaved[1::2] = stereo[:, 1]
-
-        AudioSegment_instance = original.__class__
-        return AudioSegment_instance(
-            interleaved.tobytes(),
+        # (N,2) 的 C 连续数组按行主序 reshape(-1) 天然就是 L/R 交织，
+        # 无需再分配 interleaved 中间数组（省一份全量内存）
+        return original.__class__(
+            stereo_int.reshape(-1).tobytes(),
             sample_width=sample_width,
             frame_rate=frame_rate,
             channels=2,
@@ -687,19 +692,32 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
 def export_with_nvenc(audio_segment, output_path, format_type="mp3",
                       bitrate="192k", sample_rate=44100, channels=2,
                       stop_check=None):
-    temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    temp_wav.close()
-
     ar_arg = str(sample_rate)
     ac_arg = str(channels)
 
-    try:
+    temp_wav = None
+    if audio_segment.sample_width == 2:
+        # 16bit 走原始 PCM 直接喂 ffmpeg stdin，省掉临时 WAV 的整段磁盘写+读
+        input_args = [
+            "-f", "s16le",
+            "-ar", str(audio_segment.frame_rate),
+            "-ac", str(audio_segment.channels),
+            "-i", "pipe:0",
+        ]
+        input_data = audio_segment.raw_data
+    else:
+        # 8/32bit 等少见位深：pydub 内部会做位深换算，走临时 WAV 保证正确
+        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp_wav.close()
         audio_segment.export(temp_wav.name, format="wav")
+        input_args = ["-i", temp_wav.name]
+        input_data = None
 
+    try:
         if format_type == "mp3":
             cmd = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", temp_wav.name,
+            ] + input_args + [
                 "-c:a", "libmp3lame",
                 "-b:a", bitrate,
                 "-ar", ar_arg,
@@ -710,7 +728,7 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3",
             if is_aac_nvenc_available():
                 cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                    "-i", temp_wav.name,
+                ] + input_args + [
                     "-c:a", "aac_nvenc",
                     "-b:a", bitrate,
                     "-ar", ar_arg,
@@ -720,7 +738,7 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3",
             else:
                 cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                    "-i", temp_wav.name,
+                ] + input_args + [
                     "-c:a", "aac",
                     "-b:a", bitrate,
                     "-ar", ar_arg,
@@ -730,7 +748,7 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3",
         elif format_type in ("hevc", "h265"):
             cmd = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", temp_wav.name,
+            ] + input_args + [
                 "-c:a", "aac",
                 "-b:a", bitrate,
                 "-ar", ar_arg,
@@ -741,19 +759,20 @@ def export_with_nvenc(audio_segment, output_path, format_type="mp3",
         else:
             cmd = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", temp_wav.name,
+            ] + input_args + [
                 "-acodec", "pcm_s16le",
                 "-ar", ar_arg,
                 "-ac", ac_arg,
                 output_path
             ]
 
-        _run_ffmpeg(cmd, stop_check=stop_check)
+        _run_ffmpeg(cmd, stop_check=stop_check, input_data=input_data)
     finally:
-        try:
-            os.unlink(temp_wav.name)
-        except Exception:
-            pass
+        if temp_wav is not None:
+            try:
+                os.unlink(temp_wav.name)
+            except Exception:
+                pass
 
 
 def extract_audio_from_video(video_path, stop_check=None):
@@ -798,18 +817,38 @@ def replace_audio_in_video(video_path, audio_path, output_path,
     _run_ffmpeg(cmd, stop_check=stop_check)
 
 
-def _run_ffmpeg(cmd, stop_check=None):
+def _run_ffmpeg(cmd, stop_check=None, input_data=None):
     """运行 ffmpeg 命令，支持通过 stop_check 回调中断。
 
     stop_check 是一个无参 callable，返回 True 时终止子进程并抛出 RuntimeError。
+    input_data 非空时把字节流写入 ffmpeg stdin（配合 "-i pipe:0" 使用，
+    避免大音频先落临时文件再读回的磁盘往返）。
     """
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    stdin = subprocess.PIPE if input_data is not None else None
     proc = subprocess.Popen(
         cmd,
+        stdin=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=creation_flags,
     )
+    if input_data is not None:
+        # 后台线程喂数据：stdin 管道写满会阻塞，不能放在主 poll 循环里
+        def _feed():
+            try:
+                proc.stdin.write(input_data)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass  # 进程被 terminate 时管道断开属正常
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_feed, daemon=True).start()
+
     try:
         while proc.poll() is None:
             if stop_check is not None and stop_check():

@@ -374,6 +374,8 @@ class BatchExecutor(QThread):
         worker.start()
         self._current_worker = worker
         loop.exec()
+        # finished_signal 在 run() 的 finally 之前发出，必须等线程真正退出再释放
+        worker.wait()
         self._current_worker = None
 
         self.progress_signal.emit(total, total, 1)
@@ -455,6 +457,8 @@ class BatchExecutor(QThread):
         worker.start()
         self._current_worker = worker
         loop.exec()
+        # finished_signal 在 run() 的 finally 之前发出，必须等线程真正退出再释放
+        worker.wait()
         self._current_worker = None
 
         self.progress_signal.emit(total, total, 3)
@@ -516,6 +520,8 @@ class BatchExecutor(QThread):
 
         self._current_worker = worker
         loop.exec()
+        # finished_signal 在 run() 的 finally 之前发出，必须等线程真正退出再释放
+        worker.wait()
         self._current_worker = None
 
         ok, msg = result[0] if result[0] else (False, "未知错误")

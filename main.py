@@ -30,16 +30,19 @@ if os.name == "nt":
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 
+from src.crash_log import install as install_crash_log
 from src.workflow_gui import WorkflowMainWindow
 from src.config import WorkflowConfig
 
-VERSION = "v2.0.4"
+VERSION = "v2.1.0"
 
 _ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "resources", "configs", "ui.ico")
 
 
 def main():
+    # 兜底钩子必须在 QApplication 创建前安装（Qt 消息处理器的替换时机）
+    install_crash_log()
     app = QApplication(sys.argv)
     if os.path.exists(_ICON_PATH):
         app.setWindowIcon(QIcon(_ICON_PATH))

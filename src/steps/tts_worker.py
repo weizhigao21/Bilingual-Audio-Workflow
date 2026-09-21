@@ -299,7 +299,7 @@ class TTSWorker(QThread):
                     self.log_signal.emit("所有文件已存在，无需处理")
                     self.finished_signal.emit(True)
                     return
-                self._run_edge_tts(pending_tasks, completed, start_time, subtitle_md5, task_dir)
+                self._run_edge_tts(pending_tasks, completed, completed_weight, start_time, subtitle_md5, task_dir)
             else:
                 available_apis = self._get_available_apis()
                 if self.config.get("use_multi_api", False):
@@ -319,7 +319,7 @@ class TTSWorker(QThread):
                     self.finished_signal.emit(True)
                     return
 
-                self._run_api_tts(pending_tasks, completed, start_time, subtitle_md5, task_dir)
+                self._run_api_tts(pending_tasks, completed, completed_weight, start_time, subtitle_md5, task_dir)
 
         except Exception as e:
             self.log_signal.emit(f"处理出错: {e}")
@@ -353,7 +353,7 @@ class TTSWorker(QThread):
                 available_apis = api_configs[:1]
         return available_apis
 
-    def _run_edge_tts(self, pending_tasks, completed, start_time, task_id, task_dir):
+    def _run_edge_tts(self, pending_tasks, completed, completed_weight, start_time, task_id, task_dir):
         import concurrent.futures
 
         voice = self.config.get("edge_voice", "zh-CN-XiaoxiaoNeural")
@@ -438,7 +438,7 @@ class TTSWorker(QThread):
 
         self.finished_signal.emit(True)
 
-    def _run_api_tts(self, pending_tasks, completed, start_time, task_id, task_dir):
+    def _run_api_tts(self, pending_tasks, completed, completed_weight, start_time, task_id, task_dir):
         use_bulk = self.config.get("use_bulk_api", True)
         bulk_batch_size = self.config.get("bulk_batch_size", 5)
 

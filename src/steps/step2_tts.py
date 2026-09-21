@@ -144,25 +144,34 @@ class TTSBridgeWorker(QThread):
         # TTSWorker 已完成，_on_finished 在 loop 中通过信号已自动调用
 
     def _on_total(self, total: int):
-        self._total = total
-        self.total_signal.emit(total)
+        try:
+            self._total = total
+            self.total_signal.emit(total)
+        except Exception:
+            pass
 
     def _on_total_weight(self, total_weight: int):
-        self._total_weight = total_weight
+        try:
+            self._total_weight = total_weight
+        except Exception:
+            pass
 
     def _emit_pct_and_status(self):
         """计算 0-100 百分比（优先按字数加权）并连同状态文本一起发出。"""
-        if self._total_weight > 0:
-            pct = int(self._weight_done * 100 / self._total_weight)
-        elif self._total > 0:
-            pct = int(self._done_count * 100 / self._total)
-        else:
-            pct = 0
-        pct = min(100, max(0, pct))
-        self.progress_signal.emit(pct)
-        self.status_signal.emit(
-            f"片段 {self._done_count}/{self._total} · 剩余 {self._eta_text}"
-        )
+        try:
+            if self._total_weight > 0:
+                pct = int(self._weight_done * 100 / self._total_weight)
+            elif self._total > 0:
+                pct = int(self._done_count * 100 / self._total)
+            else:
+                pct = 0
+            pct = min(100, max(0, pct))
+            self.progress_signal.emit(pct)
+            self.status_signal.emit(
+                f"片段 {self._done_count}/{self._total} · 剩余 {self._eta_text}"
+            )
+        except Exception:
+            pass
 
     def _on_progress(self, completed: int):
         """记录已完成片段数并更新进度（字数加权可用时优先）。"""
@@ -170,8 +179,11 @@ class TTSBridgeWorker(QThread):
         self._emit_pct_and_status()
 
     def _on_weight_progress(self, weight: int):
-        self._weight_done = weight
-        self._emit_pct_and_status()
+        try:
+            self._weight_done = weight
+            self._emit_pct_and_status()
+        except Exception:
+            pass
 
     def _on_eta(self, text: str):
         self._eta_text = text

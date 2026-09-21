@@ -932,7 +932,13 @@ class WorkflowMainWindow(QMainWindow):
             task.set_step_error(step, msg)
             self._append_log(f"[步骤{step}] 失败: {msg}")
 
-        self._workers[step] = None
+        # 释放 worker 前必须等线程真正退出：finished_signal 在 run() 的
+        # finally（防休眠关闭/缓存落盘）之前发出，立即丢弃引用会触发
+        # "QThread: Destroyed while thread is still running" 原生 abort 闪退
+        worker = self._workers.get(step)
+        if worker is not None:
+            worker.wait()
+            self._workers[step] = None
         self.task_queue.update_task(task)
         self._refresh_step_panels(task)
         if step == 3:
