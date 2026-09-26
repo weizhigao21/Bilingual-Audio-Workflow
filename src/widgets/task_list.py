@@ -16,9 +16,7 @@ from .common import _natural_sort_key
 class TaskListWidget(QTreeWidget):
     """左侧任务列表（树形）。
 
-    两层结构：
-      - 顶层：文件夹任务组（TaskGroup）节点 与 散任务（未分组）节点
-      - 子层：组内的音频文件任务（TaskInfo）
+    文件夹组下按源文件相对路径显示任意层级的目录与音频任务。
     支持拖拽添加视频/字幕/配音文件。
     """
     task_selected = pyqtSignal(str)   # task_id
@@ -28,6 +26,9 @@ class TaskListWidget(QTreeWidget):
     group_selected = pyqtSignal(str)  # group_id
     group_remove_requested = pyqtSignal(str)
     group_rerun_requested = pyqtSignal(str, int)  # (group_id, step)
+    folder_selected = pyqtSignal(str, str)  # (group_id, relative_folder)
+    folder_remove_requested = pyqtSignal(str, str)
+    folder_rerun_requested = pyqtSignal(str, str, int)
 
     # 源视频/音频文件（创建新任务）
     VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts",
@@ -41,6 +42,7 @@ class TaskListWidget(QTreeWidget):
     ROLE_KIND = Qt.ItemDataRole.UserRole          # "group" / "task"
     ROLE_ID = Qt.ItemDataRole.UserRole + 1        # group_id / task_id
     ROLE_NAME = Qt.ItemDataRole.UserRole + 2      # 显示名（用于排序）
+    ROLE_FOLDER_REL = Qt.ItemDataRole.UserRole + 3  # 相对组根目录的子目录路径
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -51,6 +53,10 @@ class TaskListWidget(QTreeWidget):
         self.currentItemChanged.connect(self._on_item_changed)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._task_queue = None  # 由主窗口设置引用
+        self._group_items = {}
+        self._folder_items = {}
+        self._task_items = {}
+        self._task_objects = {}
 
     def set_task_queue(self, task_queue):
         """主窗口设置 task_queue 引用，用于反查任务与分组。"""
@@ -58,26 +64,29 @@ class TaskListWidget(QTreeWidget):
 
     # ---------- 节点查找 ----------
     def _find_group_item(self, group_id: str):
-        for i in range(self.topLevelItemCount()):
-            item = self.topLevelItem(i)
-            if (item.data(0, self.ROLE_KIND) == "group"
-                    and item.data(0, self.ROLE_ID) == group_id):
-                return item
-        return None
+        return self._group_items.get(group_id)
 
     def _find_task_item(self, task_id: str):
-        for i in range(self.topLevelItemCount()):
-            top = self.topLevelItem(i)
-            if (top.data(0, self.ROLE_KIND) == "task"
-                    and top.data(0, self.ROLE_ID) == task_id):
-                return top
-            if top.data(0, self.ROLE_KIND) == "group":
-                for j in range(top.childCount()):
-                    child = top.child(j)
-                    if (child.data(0, self.ROLE_KIND) == "task"
-                            and child.data(0, self.ROLE_ID) == task_id):
-                        return child
-        return None
+        return self._task_items.get(task_id)
+
+    @staticmethod
+    def _folder_key(group_id: str, relative_folder: str):
+        return group_id, os.path.normcase(os.path.normpath(relative_folder))
+
+    def _find_folder_item(self, group_id: str, relative_folder: str):
+        return self._folder_items.get(self._folder_key(group_id, relative_folder))
+
+    @staticmethod
+    def _task_relative_folder(task: TaskInfo, group: TaskGroup) -> str:
+        root = os.path.abspath(group.folder_path)
+        source_dir = os.path.abspath(os.path.dirname(task.source_path))
+        try:
+            if os.path.normcase(os.path.commonpath([root, source_dir])) != os.path.normcase(root):
+                return ""
+            relative = os.path.relpath(source_dir, root)
+            return "" if relative == "." else relative
+        except ValueError:
+            return ""
 
     def _top_level_insert_index(self, name: str) -> int:
         """顶层（组与散任务混排）按名称自然排序的插入位置。"""
@@ -89,15 +98,36 @@ class TaskListWidget(QTreeWidget):
                 return i
         return self.topLevelItemCount()
 
-    def _child_insert_index(self, group_item, name: str) -> int:
-        """组内按名称自然排序的插入位置。"""
-        new_key = _natural_sort_key(name)
-        for i in range(group_item.childCount()):
-            child = group_item.child(i)
+    def _child_insert_index(self, parent, name: str, kind: str) -> int:
+        """目录优先，其次按名称自然排序。"""
+        new_key = (0 if kind == "folder" else 1, _natural_sort_key(name))
+        for i in range(parent.childCount()):
+            child = parent.child(i)
             child_name = child.data(0, self.ROLE_NAME) or ""
-            if _natural_sort_key(child_name) > new_key:
+            child_kind = child.data(0, self.ROLE_KIND)
+            old_key = (0 if child_kind == "folder" else 1,
+                       _natural_sort_key(child_name))
+            if old_key > new_key:
                 return i
-        return group_item.childCount()
+        return parent.childCount()
+
+    def _ensure_folder_item(self, group: TaskGroup, relative_folder: str):
+        parent = self._find_group_item(group.group_id)
+        current = ""
+        for part in relative_folder.split(os.sep):
+            current = os.path.join(current, part) if current else part
+            folder_item = self._find_folder_item(group.group_id, current)
+            if folder_item is None:
+                folder_item = QTreeWidgetItem()
+                folder_item.setData(0, self.ROLE_KIND, "folder")
+                folder_item.setData(0, self.ROLE_ID, group.group_id)
+                folder_item.setData(0, self.ROLE_NAME, part)
+                folder_item.setData(0, self.ROLE_FOLDER_REL, current)
+                folder_item.setText(0, f"0% ○ [目录] {part} (0/0)")
+                parent.insertChild(self._child_insert_index(parent, part, "folder"), folder_item)
+                self._folder_items[self._folder_key(group.group_id, current)] = folder_item
+            parent = folder_item
+        return parent
 
     # ---------- 添加节点 ----------
     def add_group_item(self, group: TaskGroup):
@@ -108,6 +138,7 @@ class TaskListWidget(QTreeWidget):
         self.insertTopLevelItem(
             self._top_level_insert_index(group.group_name), item
         )
+        self._group_items[group.group_id] = item
         self.expandItem(item)
 
     def add_task_item(self, task: TaskInfo):
@@ -115,16 +146,20 @@ class TaskListWidget(QTreeWidget):
         item.setData(0, self.ROLE_KIND, "task")
         item.setData(0, self.ROLE_ID, task.task_id)
         self._update_item_text(item, task)
+        self._task_objects[task.task_id] = task
 
         if task.group_id and self._task_queue:
+            group = self._task_queue.get_group(task.group_id)
             group_item = self._find_group_item(task.group_id)
-            if group_item:
-                group_item.insertChild(
-                    self._child_insert_index(group_item, task.source_name), item
+            if group and group_item:
+                relative_folder = self._task_relative_folder(task, group)
+                parent = (self._ensure_folder_item(group, relative_folder)
+                          if relative_folder else group_item)
+                parent.insertChild(
+                    self._child_insert_index(parent, task.source_name, "task"), item
                 )
-                group = self._task_queue.get_group(task.group_id)
-                if group:
-                    self._update_group_text(group_item, group)
+                self._task_items[task.task_id] = item
+                self._refresh_ancestors(parent)
                 self.setCurrentItem(item)
                 return
 
@@ -132,6 +167,7 @@ class TaskListWidget(QTreeWidget):
         self.insertTopLevelItem(
             self._top_level_insert_index(task.source_name), item
         )
+        self._task_items[task.task_id] = item
         self.setCurrentItem(item)
 
     # ---------- 更新节点 ----------
@@ -139,13 +175,9 @@ class TaskListWidget(QTreeWidget):
         item = self._find_task_item(task.task_id)
         if not item:
             return
+        self._task_objects[task.task_id] = task
         self._update_item_text(item, task)
-        # 同步刷新所属组的汇总文本
-        if task.group_id and self._task_queue:
-            group = self._task_queue.get_group(task.group_id)
-            group_item = self._find_group_item(task.group_id)
-            if group and group_item:
-                self._update_group_text(group_item, group)
+        self._refresh_ancestors(item.parent())
 
     def update_group_item(self, group: TaskGroup):
         item = self._find_group_item(group.group_id)
@@ -153,25 +185,65 @@ class TaskListWidget(QTreeWidget):
             self._update_group_text(item, group)
 
     def remove_task_item(self, task_id: str):
-        item = self._find_task_item(task_id)
+        item = self._task_items.pop(task_id, None)
+        self._task_objects.pop(task_id, None)
         if not item:
             return
         parent = item.parent()
         if parent:
             parent.takeChild(parent.indexOfChild(item))
-            # 组内任务被移除后刷新组节点文本
-            if self._task_queue:
-                gid = parent.data(0, self.ROLE_ID)
-                group = self._task_queue.get_group(gid) if gid else None
-                if group:
-                    self._update_group_text(parent, group)
+            while (parent and parent.data(0, self.ROLE_KIND) == "folder"
+                   and parent.childCount() == 0):
+                grandparent = parent.parent()
+                key = self._folder_key(parent.data(0, self.ROLE_ID),
+                                       parent.data(0, self.ROLE_FOLDER_REL))
+                self._folder_items.pop(key, None)
+                grandparent.takeChild(grandparent.indexOfChild(parent))
+                parent = grandparent
+            self._refresh_ancestors(parent)
         else:
             self.takeTopLevelItem(self.indexOfTopLevelItem(item))
 
     def remove_group_item(self, group_id: str):
-        item = self._find_group_item(group_id)
+        item = self._group_items.pop(group_id, None)
         if item:
             self.takeTopLevelItem(self.indexOfTopLevelItem(item))
+            self._folder_items = {
+                key: value for key, value in self._folder_items.items()
+                if key[0] != group_id
+            }
+
+    def select_group_item(self, group_id: str):
+        item = self._find_group_item(group_id)
+        if item:
+            self.setCurrentItem(item)
+
+    def select_folder_item(self, group_id: str, relative_folder: str):
+        item = self._find_folder_item(group_id, relative_folder)
+        if item:
+            self.setCurrentItem(item)
+
+    def _descendant_tasks(self, item):
+        tasks = []
+        for index in range(item.childCount()):
+            child = item.child(index)
+            if child.data(0, self.ROLE_KIND) == "task":
+                task = self._task_objects.get(child.data(0, self.ROLE_ID))
+                if task:
+                    tasks.append(task)
+            else:
+                tasks.extend(self._descendant_tasks(child))
+        return tasks
+
+    def _refresh_ancestors(self, item):
+        while item is not None and self._task_queue:
+            kind = item.data(0, self.ROLE_KIND)
+            group = self._task_queue.get_group(item.data(0, self.ROLE_ID))
+            if kind == "folder" and group:
+                self._update_folder_text(item, group)
+            elif kind == "group" and group:
+                self._update_group_text(item, group)
+            item = item.parent()
 
     # ---------- 文本 ----------
     @staticmethod
@@ -197,6 +269,16 @@ class TaskListWidget(QTreeWidget):
         )
         item.setData(0, self.ROLE_NAME, group.group_name)
 
+    def _update_folder_text(self, item: QTreeWidgetItem, root_group: TaskGroup):
+        tasks = self._descendant_tasks(item)
+        name = os.path.basename(item.data(0, self.ROLE_FOLDER_REL))
+        folder = TaskGroup(root_group.group_id, name, "", tasks)
+        progress = int(folder.progress() * 100)
+        icon = self._status_icon(folder.overall_status())
+        item.setText(
+            0, f"{progress}% {icon} [目录] {name} ({folder.done_count()}/{len(tasks)})"
+        )
+
     @staticmethod
     def _overall_status(task: TaskInfo) -> str:
         if task.step3_status == STEP_DONE:
@@ -217,6 +299,8 @@ class TaskListWidget(QTreeWidget):
             self.task_selected.emit(item_id)
         elif kind == "group":
             self.group_selected.emit(item_id)
+        elif kind == "folder":
+            self.folder_selected.emit(item_id, current.data(0, self.ROLE_FOLDER_REL))
 
     def _on_context_menu(self, pos):
         item = self.itemAt(pos)
@@ -238,6 +322,22 @@ class TaskListWidget(QTreeWidget):
                 act.triggered.connect(
                     lambda checked=False, s=step, gid=item_id:
                         self.group_rerun_requested.emit(gid, s)
+                )
+                menu.addAction(act)
+        elif kind == "folder":
+            relative_folder = item.data(0, self.ROLE_FOLDER_REL)
+            count = len(self._descendant_tasks(item))
+            act_remove = QAction(f"移除该目录下全部 {count} 个任务", self)
+            act_remove.triggered.connect(
+                lambda: self.folder_remove_requested.emit(item_id, relative_folder)
+            )
+            menu.addAction(act_remove)
+            menu.addSeparator()
+            for step, label in ((1, "步骤1(字幕)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
+                act = QAction(f"重跑此目录全部 {label}", self)
+                act.triggered.connect(
+                    lambda checked=False, s=step, gid=item_id, rel=relative_folder:
+                        self.folder_rerun_requested.emit(gid, rel, s)
                 )
                 menu.addAction(act)
         else:

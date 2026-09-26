@@ -516,6 +516,35 @@ class TaskQueue(QObject):
                 return g
         return None
 
+    def tasks_in_group_folder(self, group_id: str, relative_folder: str) -> list:
+        """返回组内指定子目录及其后代的任务，不依赖界面节点。"""
+        group = self.get_group(group_id)
+        if not group or not relative_folder or os.path.isabs(relative_folder):
+            return []
+        root = os.path.normcase(os.path.abspath(group.folder_path))
+        target = os.path.normcase(os.path.abspath(os.path.join(root, relative_folder)))
+        try:
+            if target == root or os.path.commonpath([root, target]) != root:
+                return []
+        except ValueError:
+            return []
+        matches = []
+        for task in group.tasks:
+            source_dir = os.path.normcase(os.path.abspath(os.path.dirname(task.source_path)))
+            try:
+                if os.path.commonpath([source_dir, target]) == target:
+                    matches.append(task)
+            except ValueError:
+                continue
+        return matches
+
+    def remove_group_folder(self, group_id: str, relative_folder: str) -> int:
+        """仅移除子目录任务与恢复记录，不删除源文件或生成文件。"""
+        tasks = self.tasks_in_group_folder(group_id, relative_folder)
+        for task in list(tasks):
+            self.remove_task(task.task_id)
+        return len(tasks)
+
     def remove_group(self, group_id: str):
         """移除文件夹组及其全部子任务（仅列表，不删目录）。"""
         group = self.get_group(group_id)

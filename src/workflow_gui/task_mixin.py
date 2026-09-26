@@ -16,6 +16,7 @@ class TaskMixin:
     # ========== 任务选择 ==========
     def _on_task_selected(self, task_id: str):
         self._current_group = None
+        self._selected_folder = None
         self.task_queue.set_current(task_id)
 
     def _on_group_selected(self, group_id: str):
@@ -24,7 +25,38 @@ class TaskMixin:
         if not group:
             return
         self._current_group = group
+        self._selected_folder = None
         self.task_queue.set_current(None)
+
+    def _folder_group(self, group_id: str, relative_folder: str):
+        root = self.task_queue.get_group(group_id)
+        if not root:
+            return None
+        tasks = self.task_queue.tasks_in_group_folder(group_id, relative_folder)
+        if not tasks:
+            return None
+        return TaskGroup(
+            group_id, relative_folder,
+            os.path.join(root.folder_path, relative_folder), tasks,
+        )
+
+    def _on_folder_selected(self, group_id: str, relative_folder: str):
+        folder = self._folder_group(group_id, relative_folder)
+        if folder:
+            self._current_group = folder
+            self._selected_folder = (group_id, relative_folder)
+            self.task_queue.set_current(None)
+
+    def _on_task_removed(self, task_id: str):
+        if not self._selected_folder:
+            return
+        group_id, relative_folder = self._selected_folder
+        folder = self._folder_group(group_id, relative_folder)
+        if folder:
+            self._current_group = folder
+            self._show_group_summary(folder)
+        else:
+            self.task_list.select_group_item(group_id)
 
     def _show_group_summary(self, group: TaskGroup):
         """在右侧面板显示文件夹组的汇总状态。"""
@@ -58,15 +90,19 @@ class TaskMixin:
 
     def _on_current_changed(self, task: TaskInfo):
         if task is None:
-            if self._current_group:
+            if (self._current_group
+                    and self.task_queue.get_group(self._current_group.group_id)):
                 self._show_group_summary(self._current_group)
                 return
+            self._current_group = None
+            self._selected_folder = None
             self.current_task_label.setText("未选择任务")
             self.metadata_btn.setEnabled(False)
             for panel in self.step_panels.values():
                 panel.reset()
             return
         self._current_group = None
+        self._selected_folder = None
         self.current_task_label.setText(
             f"当前任务：{task.source_name}  (创建于 {task.created_at})"
         )
@@ -77,7 +113,7 @@ class TaskMixin:
         if self.task_queue.current and self.task_queue.current.task_id == task.task_id:
             self._refresh_step_panels(task)
         elif (self._current_group and not self._batch_executor
-              and task.group_id == self._current_group.group_id):
+              and any(t.task_id == task.task_id for t in self._current_group.tasks)):
             # 组内任务状态变化时刷新组汇总（批量执行中不刷新，避免干扰进度显示）
             self._show_group_summary(self._current_group)
 
@@ -186,18 +222,50 @@ class TaskMixin:
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            count = len(group.tasks)
             self.task_queue.remove_group(group_id)
             if self._current_group and self._current_group.group_id == group_id:
                 self._current_group = None
+                self._selected_folder = None
             self._append_log(
-                f"[文件夹] 已移除组: {group.group_name} ({len(group.tasks)} 个任务)"
+                f"[文件夹] 已移除组: {group.group_name} ({count} 个任务)"
             )
+
+    def _on_folder_remove(self, group_id: str, relative_folder: str):
+        tasks = self.task_queue.tasks_in_group_folder(group_id, relative_folder)
+        if not tasks:
+            return
+        if self._batch_executor or any(self._workers.values()):
+            QMessageBox.warning(self, "任务正在运行", "请在当前处理结束后移除目录任务。")
+            return
+        reply = QMessageBox.question(
+            self, "移除目录任务",
+            f"确定移除「{relative_folder}」及其子目录中的 {len(tasks)} 个任务？\n"
+            "只从任务列表移除，不删除源音频或已生成的文件。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        removed = self.task_queue.remove_group_folder(group_id, relative_folder)
+        self.task_list.select_group_item(group_id)
+        self._append_log(f"[文件夹] 已移除目录任务: {relative_folder} ({removed} 个)")
 
     def _on_group_rerun(self, group_id: str, step: int):
         """重跑组内所有任务的某一步（重置状态后逐个执行）。"""
         group = self.task_queue.get_group(group_id)
         if not group:
             return
+        self._selected_folder = None
+        self._rerun_group_tasks(group, step)
+
+    def _on_folder_rerun(self, group_id: str, relative_folder: str, step: int):
+        group = self._folder_group(group_id, relative_folder)
+        if group:
+            self.task_list.select_folder_item(group_id, relative_folder)
+            self._selected_folder = (group_id, relative_folder)
+            self._rerun_group_tasks(group, step)
+
+    def _rerun_group_tasks(self, group: TaskGroup, step: int):
         if self._batch_executor:
             QMessageBox.warning(self, "提示", "已有批量执行正在进行中。")
             return

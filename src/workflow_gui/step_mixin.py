@@ -17,6 +17,13 @@ class StepMixin:
     def _on_start_step(self, step: int):
         # 组模式：对组内所有任务逐个执行该步骤
         if self._current_group:
+            if self._selected_folder:
+                group_id, relative_folder = self._selected_folder
+                folder = self._folder_group(group_id, relative_folder)
+                if not folder:
+                    QMessageBox.information(self, "提示", "该子目录已没有任务。")
+                    return
+                self._current_group = folder
             self._start_group_step(self._current_group, step)
             return
         task = self.task_queue.current

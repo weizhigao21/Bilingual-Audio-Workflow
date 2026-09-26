@@ -47,6 +47,7 @@ class WorkflowMainWindow(
         self._batch_executor = None
         # 当前选中的文件夹组（选中组节点时非 None）
         self._current_group: TaskGroup = None
+        self._selected_folder = None  # (group_id, 相对子目录) 或 None
 
         self._build_ui()
         self._connect_signals()
@@ -186,8 +187,12 @@ class WorkflowMainWindow(
         self.task_list.group_selected.connect(self._on_group_selected)
         self.task_list.group_remove_requested.connect(self._on_group_remove)
         self.task_list.group_rerun_requested.connect(self._on_group_rerun)
+        self.task_list.folder_selected.connect(self._on_folder_selected)
+        self.task_list.folder_remove_requested.connect(self._on_folder_remove)
+        self.task_list.folder_rerun_requested.connect(self._on_folder_rerun)
         self.task_queue.task_added.connect(self.task_list.add_task_item)
         self.task_queue.task_removed.connect(self.task_list.remove_task_item)
+        self.task_queue.task_removed.connect(self._on_task_removed)
         self.task_queue.task_updated.connect(self._on_task_updated)
         self.task_queue.current_changed.connect(self._on_current_changed)
         self.task_queue.group_added.connect(self.task_list.add_group_item)
