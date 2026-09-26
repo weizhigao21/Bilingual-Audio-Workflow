@@ -8,8 +8,10 @@
     - MixerBatchWorker: 多任务并行混音（ThreadPoolExecutor）
 """
 import os
-import tempfile
+import wave
+import audioop
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -23,10 +25,12 @@ from .audio_utils import (
     mix_with_numpy,
     extract_audio_from_video,
     replace_audio_in_video,
-    export_with_nvenc,
+    export_audio_ffmpeg,
+    resample_audio,
     clear_mix_cache,
 )
-from .app_config import is_nvenc_available, is_cuda_available
+from .audio_utils.ffmpeg_utils import probe_audio
+from .stream_mixer import mix_streaming_task
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"}
@@ -35,6 +39,31 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".t
 # ---------- 模块级混音核心逻辑 ----------
 # 这些函数与 QThread 无关，可被 MixerWorker 和 MixerBatchWorker 共用，
 # 也能在 ThreadPoolExecutor 的多个工作线程中并行调用。
+
+
+def _export_wav_24bit(audio, output_path, stop_check=None):
+    """导出真正的 24bit WAV。
+
+    本版 pydub 无法在内部表示 24bit：set_sample_width(3) 会被构造函数
+    提升为 32bit 存储，直接 export 只会得到 32bit 文件。
+    直接用 audioop.lin2lin(4,3) 取回高 3 字节，避免先 32→24→32
+    的整段往返复制，经 stdlib wave 写出经典 PCM 头的
+    24bit WAV。不走 ffmpeg 的原因：ffmpeg 对 pcm_s24le 一律写
+    WAVE_FORMAT_EXTENSIBLE(0xFFFE) 头，stdlib wave 及部分老旧工具不认。
+    """
+    if audio.sample_width != 4:
+        audio = audio.set_sample_width(4)
+    # 每次处理约 10 秒数据：兼顾 stop 响应与转换速度
+    chunk_bytes = audio.frame_rate * audio.channels * 4 * 10
+    with wave.open(output_path, "wb") as w:
+        w.setnchannels(audio.channels)
+        w.setsampwidth(3)
+        w.setframerate(audio.frame_rate)
+        raw = audio.raw_data
+        for off in range(0, len(raw), chunk_bytes):
+            if stop_check is not None and stop_check():
+                raise RuntimeError("用户已停止处理")
+            w.writeframes(audioop.lin2lin(raw[off:off + chunk_bytes], 4, 3))
 
 
 def _cleanup(*paths):
@@ -111,13 +140,23 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
     _log(f"[音频混音] 导出目录: {output_folder}")
 
     # 跳过已存在
-    if cfg.get("skip_existing", True) and os.path.exists(final_output):
+    if cfg.get("skip_existing", True) and not task.force_remix and os.path.exists(final_output):
         _log(f"[音频混音] 已存在，跳过: {final_output}")
         _progress(100)
         return True, final_output
 
+    # 长音频避免 AudioSegment.from_file 一次解码整段并物化多个全长数组。
+    threshold = max(0, int(cfg.get("streaming_threshold_minutes", 20)))
+    audio_info = probe_audio(original_path)
+    if audio_info and audio_info[1] >= threshold * 60:
+        return mix_streaming_task(
+            task, cfg, final_output, is_video, audio_info,
+            log_callback=_log, progress_callback=_progress, stop_check=stop_check,
+        )
+
     # 1. 加载原始音频
     temp_audio_path = None
+    export_output = None
     try:
         if is_video:
             _log("[音频混音] 提取视频音轨...")
@@ -129,12 +168,14 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                 _cleanup(temp_audio_path)
                 return False, "用户中止"
             try:
-                original_audio = AudioSegment.from_file(temp_audio_path)
+                with open(temp_audio_path, "rb") as audio_file:
+                    original_audio = AudioSegment.from_file(audio_file)
             except Exception:
                 _cleanup(temp_audio_path)
                 raise
         else:
-            original_audio = AudioSegment.from_file(original_path)
+            with open(original_path, "rb") as audio_file:
+                original_audio = AudioSegment.from_file(audio_file)
 
         _progress(15)
 
@@ -184,7 +225,8 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
 
             audio_path = os.path.join(mix_folder, audio_info["filename"])
             try:
-                mix_segment = AudioSegment.from_file(audio_path)
+                with open(audio_path, "rb") as audio_file:
+                    mix_segment = AudioSegment.from_file(audio_file)
                 angle = per_file_angles.get(audio_info["filename"], 180)
                 mix_items.append((mix_segment, audio_info["timestamp_ms"], angle))
             except Exception as e:
@@ -200,12 +242,16 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
 
         _log("[音频混音] 合成中...")
         _progress(75)
+        # 高位深 WAV 在混音前扩展精度，避免先量化到 16bit 再补零导出。
+        if output_format == "wav" and int(cfg.get("wav_bit_depth", 16)) > 16:
+            original_audio = original_audio.set_sample_width(4)
         align_onset = cfg.get("align_onset", False)
         content_alignment = cfg.get("content_alignment", False)
         _log(
             f"[音频混音] 参数: 音量={cfg.get('volume_db', 0.0)}dB, "
             f"模式={cfg.get('auto_volume', 'off')}, 起始对齐={align_onset}, "
-            f"内容对齐={content_alignment}"
+            f"内容对齐={content_alignment}, 峰值保护={cfg.get('peak_mode', 'peak')}, "
+            f"高质量重采样={cfg.get('high_quality_resample', True)}"
         )
         original_audio = mix_with_numpy(
             original_audio, mix_items,
@@ -213,6 +259,9 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
             auto_volume=cfg.get("auto_volume", "off"),
             align_onset=align_onset,
             content_alignment=content_alignment,
+            peak_mode=cfg.get("peak_mode", "peak"),
+            high_quality=cfg.get("high_quality_resample", True),
+            stop_check=stop_check,
         )
         _progress(85)
 
@@ -223,62 +272,45 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         sample_rate = int(cfg.get("audio_sample_rate", 44100))
         channels = int(cfg.get("audio_channels", 2))
         wav_bit_depth = int(cfg.get("wav_bit_depth", 16))
-        if is_video:
-            # 视频模式：导出临时 wav → 替换视频音轨
-            temp_mixed = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            temp_mixed.close()
-            try:
-                original_audio.export(temp_mixed.name, format="wav")
-                replace_audio_in_video(
-                    original_path, temp_mixed.name, final_output,
-                    bitrate=bitrate, sample_rate=sample_rate,
-                    channels=channels,
-                    stop_check=stop_check,
-                )
-            finally:
-                _cleanup(temp_mixed.name)
-        else:
-            use_gpu = (
-                cfg.get("use_gpu", True)
-                and is_nvenc_available() and is_cuda_available()
-                and output_format in ("mp3", "m4a", "aac")
+        high_quality = cfg.get("high_quality_resample", True)
+        # 先导出同目录临时文件；取消/失败不留下会被 skip_existing 当作成功的残片。
+        with tempfile.NamedTemporaryFile(dir=output_folder, prefix=".mix-",
+                                         suffix="." + output_format, delete=False) as tmp:
+            export_output = tmp.name
+        if is_video and output_format == "mp4":
+            replace_audio_in_video(
+                original_path, original_audio, export_output,
+                bitrate=bitrate, sample_rate=sample_rate, channels=channels,
+                stop_check=stop_check, high_quality=high_quality,
             )
-            if use_gpu:
-                export_with_nvenc(
-                    original_audio, final_output, output_format,
-                    bitrate=bitrate, sample_rate=sample_rate,
-                    channels=channels,
-                    stop_check=stop_check,
-                )
+        elif output_format == "wav":
+            original_audio = resample_audio(original_audio, sample_rate, stop_check, high_quality)
+            original_audio = original_audio.set_channels(channels)
+            if wav_bit_depth == 24:
+                _export_wav_24bit(original_audio, export_output, stop_check=stop_check)
             else:
-                export_params = {}
-                if output_format == "mp3":
-                    export_params = {"format": "mp3", "bitrate": bitrate}
-                elif output_format == "ogg":
-                    export_params = {"format": "ogg"}
-                elif output_format == "m4a":
-                    export_params = {"format": "ipod"}
-                elif output_format == "wav":
-                    export_params = {"format": "wav", "bit_depth": wav_bit_depth}
-                else:
-                    export_params = {"format": output_format}
-                # 采样率/声道与目标不一致时先转换
-                if original_audio.frame_rate != sample_rate:
-                    original_audio = original_audio.set_frame_rate(sample_rate)
-                if original_audio.channels != channels:
-                    original_audio = original_audio.set_channels(channels)
-                original_audio.export(final_output, **export_params)
-
+                width = max(1, min(4, wav_bit_depth // 8))
+                with open(export_output, "wb") as wav_file:
+                    original_audio.set_sample_width(width).export(wav_file, format="wav")
+        else:
+            export_audio_ffmpeg(
+                original_audio, export_output, output_format,
+                bitrate=bitrate, sample_rate=sample_rate, channels=channels,
+                stop_check=stop_check, high_quality=high_quality,
+            )
         _cleanup(temp_audio_path)
-
         if _stopped():
+            _cleanup(export_output)
             return False, "用户中止"
+        os.replace(export_output, final_output)
+        export_output = None
+        task.force_remix = False
 
         _progress(100)
         _log(f"[音频混音] 完成: {final_output}")
         return True, final_output
     except Exception as e:
-        _cleanup(temp_audio_path)
+        _cleanup(temp_audio_path, export_output)
         _log(f"[音频混音] 异常: {e}")
         return False, str(e)
 

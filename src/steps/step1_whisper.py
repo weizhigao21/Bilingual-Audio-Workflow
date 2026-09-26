@@ -122,14 +122,16 @@ class WhisperWorker(QThread):
         # 创建标志：CREATE_NO_WINDOW 避免弹出控制台窗口
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
-        # 以二进制读取 stdout，逐行用 utf-8/gbk 兜底解码，避免中文乱码
+        # 以二进制读取 stdout，逐行用 utf-8/gbk 兜底解码，避免中文乱码。
+        # bufsize 不能用 1：行缓冲仅在文本模式有效，二进制下会被忽略并触发
+        # RuntimeWarning；默认缓冲（-1）的 readline 同样即时返回完整行。
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=whisper_dir,
             creationflags=creationflags,
-            bufsize=1,
+            bufsize=-1,
         )
 
         # 解析进度正则
@@ -326,14 +328,15 @@ class WhisperBatchWorker(QThread):
                 f"设备={cfg.get('device', 'auto')}, 精度={cfg.get('compute_type', 'auto')}"
             )
 
-            # 以二进制读取 stdout，逐行用 utf-8/gbk 兜底解码，避免中文乱码
+            # 以二进制读取 stdout，逐行用 utf-8/gbk 兜底解码，避免中文乱码。
+            # 同上：二进制模式下行缓冲无效，用默认缓冲避免 RuntimeWarning。
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=whisper_dir,
                 creationflags=creationflags,
-                bufsize=1,
+                bufsize=-1,
             )
 
             # 解析进度

@@ -4,6 +4,7 @@ import sqlite3
 import shutil
 import hashlib
 import threading
+import tempfile
 
 
 def get_resource_path(relative_path):
@@ -37,9 +38,10 @@ class AudioCache:
         return self._conn
 
     def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
 
     def init_database(self):
         conn = self._get_conn()
@@ -74,7 +76,7 @@ class AudioCache:
 
             if result:
                 audio_path = result[0]
-                if os.path.exists(audio_path):
+                if os.path.isfile(audio_path) and os.path.getsize(audio_path) > 0:
                     cursor.execute(
                         "UPDATE audio_cache SET use_count = use_count + 1 WHERE text_hash = ?",
                         (text_hash,),
@@ -95,26 +97,36 @@ class AudioCache:
     def save_audio_cache(self, text, audio_path, model_name="", api_url="", ext=".wav", source_version=""):
         text_hash = self.get_text_hash(text, model_name, source_version)
         cache_file = self.get_cache_file_path(text_hash, ext)
-
-        try:
-            shutil.copy2(audio_path, cache_file)
-        except Exception:
-            pass
-
-        file_size = os.path.getsize(cache_file) if os.path.exists(cache_file) else 0
-
         with self._lock:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO audio_cache 
-                (text_hash, text_content, audio_path, model_name, api_url, file_size)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """,
-                (text_hash, text, cache_file, model_name, api_url, file_size),
-            )
-            conn.commit()
+            if not os.path.isfile(audio_path) or os.path.getsize(audio_path) == 0:
+                return False
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=CACHE_DIR, prefix=".cache-",
+                                                 suffix=ext, delete=False) as tmp:
+                    temp_path = tmp.name
+                    with open(audio_path, "rb") as source:
+                        shutil.copyfileobj(source, tmp)
+                os.replace(temp_path, cache_file)
+                temp_path = None
+                file_size = os.path.getsize(cache_file)
+                conn = self._get_conn()
+                conn.execute(
+                    """INSERT INTO audio_cache
+                    (text_hash, text_content, audio_path, model_name, api_url, file_size)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(text_hash) DO UPDATE SET
+                    audio_path=excluded.audio_path, file_size=excluded.file_size,
+                    model_name=excluded.model_name, api_url=excluded.api_url""",
+                    (text_hash, text, cache_file, model_name, api_url, file_size),
+                )
+                conn.commit()
+                return True
+            except Exception:
+                return False
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
 
     def get_cache_stats(self):
         with self._lock:

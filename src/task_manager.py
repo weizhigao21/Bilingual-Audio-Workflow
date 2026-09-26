@@ -1,23 +1,28 @@
 # -*- coding: utf-8 -*-
 """任务管理：目录约定、状态记录、多任务队列数据模型。
 
-任务目录结构：
+目录约定（现行结构）：
   workspace/
-    20260720_150000_视频名/
-      01_字幕/视频.lrc
-      02_配音/<task_id>/视频名/*.wav
-      03_混音/视频_mixed.mp4
-      task.json
+    <task_id>/task.json      # 任务状态，update_task() 时落盘
+    <字幕MD5[:8]>/*.wav      # TTS 输出，按字幕内容 MD5 寻址（见 tts_worker）
+    源文件同目录/*.lrc       # 字幕与混音输出均落在源文件所在目录
+
+任务状态写入 task.json，启动时可恢复任务与文件夹组。
 """
 import os
 import re
 import json
 import time
 import hashlib
+import shutil
+import tempfile
+import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import Optional
+from .steps.tts_profile import profile_matches
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -57,6 +62,7 @@ class TaskInfo:
     step1_error: str = ""
     step2_error: str = ""
     step3_error: str = ""
+    force_remix: bool = False             # TTS 参数变化后已有混音需重做
 
     from_folder: bool = False           # 是否来自文件夹导入（用于混音输出前缀判断）
     import_folder: str = ""             # 拖入的原始文件夹路径（用于完成后的重命名）
@@ -95,11 +101,27 @@ class TaskInfo:
         task_dir = self.task_dir
         if not os.path.exists(task_dir):
             os.makedirs(task_dir, exist_ok=True)
+        temp_path = None
         try:
-            with open(self.task_json_path, "w", encoding="utf-8") as f:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=task_dir,
+                                             prefix=".task-", suffix=".json", delete=False) as f:
+                temp_path = f.name
                 json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
-        except Exception:
+            os.replace(temp_path, self.task_json_path)
+        except OSError as e:
+            logging.getLogger(__name__).warning("保存任务状态失败: %s", e)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def forget(self):
+        """仅撤销任务恢复记录，不删除任务目录或生成文件。"""
+        try:
+            os.unlink(self.task_json_path)
+        except FileNotFoundError:
             pass
+        except OSError as e:
+            logging.getLogger(__name__).warning("移除任务记录失败: %s", e)
 
     def step_status(self, step: int) -> str:
         return [self.step1_status, self.step2_status, self.step3_status][step - 1]
@@ -131,7 +153,7 @@ class TaskInfo:
             return _prev_done(self.step2_status)
         return False
 
-    def apply_custom_inputs(self):
+    def apply_custom_inputs(self, tts_config=None):
         """检测已存在的文件，自动跳过对应步骤。
 
         检测顺序：
@@ -152,18 +174,26 @@ class TaskInfo:
             self.step2_output = self.custom_mix_folder
         # 没有自定义配音时，检测字幕MD5文件夹
         elif self.step1_status == STEP_SKIPPED:
-            tts_dir = self._detect_tts_by_subtitle_md5()
+            tts_dir = self._detect_tts_by_subtitle_md5(tts_config)
             if tts_dir:
                 self.step2_status = STEP_SKIPPED
                 self.step2_output = tts_dir
+            elif tts_config is not None and self.step2_status == STEP_SKIPPED:
+                self.step2_status = STEP_PENDING
+                self.step2_output = ""
+            if not tts_dir and tts_config is not None:
+                self.force_remix = bool(self._detect_mix_output())
+                if self.step3_status == STEP_SKIPPED:
+                    self.step3_status = STEP_PENDING
+                    self.step3_output = ""
 
         # --- 步骤3：检测已生成的混音文件 ---
-        mix_output = self._detect_mix_output()
+        mix_output = self._detect_mix_output() if self.step2_status in (STEP_DONE, STEP_SKIPPED) else ""
         if mix_output:
             self.step3_status = STEP_SKIPPED
             self.step3_output = mix_output
 
-    def _detect_tts_by_subtitle_md5(self):
+    def _detect_tts_by_subtitle_md5(self, tts_config=None):
         """根据字幕文件MD5检查 workspace 中是否有已生成的语音文件。
 
         Returns:
@@ -175,7 +205,7 @@ class TaskInfo:
             with open(self.step1_output, 'rb') as f:
                 md5 = hashlib.md5(f.read()).hexdigest()[:8]
             tts_dir = os.path.join(self.workspace_root, md5)
-            if os.path.isdir(tts_dir):
+            if os.path.isdir(tts_dir) and (tts_config is None or profile_matches(tts_dir, tts_config)):
                 wavs = [f for f in os.listdir(tts_dir) if f.endswith(".wav")]
                 if wavs:
                     return tts_dir
@@ -205,7 +235,7 @@ class TaskInfo:
                 if parent and dir_name:
                     candidates.append(os.path.join(parent, f"双语-{dir_name}"))
         # 找匹配源文件名的输出，常见格式
-        common_exts = {".mp4", ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mkv"}
+        common_exts = {".mp4", ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mkv", ".aac"}
         for bilingual_dir in candidates:
             if not os.path.isdir(bilingual_dir):
                 continue
@@ -279,7 +309,7 @@ def _sanitize_name(name: str) -> str:
 
 
 def create_task(workspace_root: str, source_path: str,
-                subtitle_path: str = "", mix_folder: str = "") -> TaskInfo:
+                subtitle_path: str = "", mix_folder: str = "", tts_config=None) -> TaskInfo:
     """根据源视频/音频路径创建新任务。
 
     Args:
@@ -290,8 +320,9 @@ def create_task(workspace_root: str, source_path: str,
     """
     source_name = os.path.splitext(os.path.basename(source_path))[0]
     source_name = _sanitize_name(source_name)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    task_id = f"{timestamp}_{source_name}"
+    # Windows 时钟可能连续两次返回相同微秒；追加随机标识避免任务目录碰撞。
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    task_id = f"{timestamp}_{uuid.uuid4().hex[:8]}_{source_name}"
 
     task = TaskInfo(
         task_id=task_id,
@@ -302,7 +333,7 @@ def create_task(workspace_root: str, source_path: str,
         custom_mix_folder=os.path.abspath(mix_folder) if mix_folder else "",
     )
     # 应用自定义输入（检测已存在文件，自动跳过对应步骤）
-    task.apply_custom_inputs()
+    task.apply_custom_inputs(tts_config)
     return task
 
 
@@ -331,12 +362,96 @@ class TaskQueue(QObject):
     VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts",
                   ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
 
-    def __init__(self, workspace_root: str):
+    def __init__(self, workspace_root: str, tts_config=None):
         super().__init__()
         self.workspace_root = workspace_root
+        self.tts_config = tts_config
         self.tasks: list = []            # 所有叶子任务（散任务 + 组内任务，扁平）
         self.groups: list = []           # List[TaskGroup]
         self._current: Optional[TaskInfo] = None
+
+    def restore_tasks(self) -> tuple:
+        """从工作区的 task.json 恢复任务和分组，返回(恢复数,忽略数)。"""
+        if not os.path.isdir(self.workspace_root):
+            return 0, 0
+        restored = []
+        ignored = 0
+        names = {f.name for f in fields(TaskInfo)}
+        existing = {task.task_id for task in self.tasks}
+        for entry in os.scandir(self.workspace_root):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            state_path = os.path.join(entry.path, "task.json")
+            if not os.path.isfile(state_path):
+                continue
+            try:
+                with open(state_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if (not isinstance(data, dict) or data.get("task_id") != entry.name
+                        or not isinstance(data.get("source_path"), str)
+                        or not isinstance(data.get("source_name"), str)
+                        or entry.name in existing):
+                    raise ValueError("任务记录字段无效或 ID 重复")
+                data = {key: value for key, value in data.items() if key in names}
+                data["workspace_root"] = self.workspace_root
+                task = TaskInfo(**data)
+                if self._reconcile_restored_task(task):
+                    task.save()
+                restored.append(task)
+                existing.add(task.task_id)
+            except (OSError, ValueError, TypeError) as e:
+                logging.getLogger(__name__).warning("忽略无效任务记录 %s: %s", state_path, e)
+                ignored += 1
+
+        # 先恢复分组，再发任务信号；列表控件需要先有父节点。
+        for task in restored:
+            if task.group_id and not self.get_group(task.group_id):
+                folder = task.import_folder or os.path.dirname(task.source_path)
+                group = TaskGroup(task.group_id, os.path.basename(folder) or folder, folder)
+                self.groups.append(group)
+                self.group_added.emit(group)
+        for task in sorted(restored, key=lambda t: (_natural_key(t.source_name), t.task_id)):
+            group = self.get_group(task.group_id) if task.group_id else None
+            if group:
+                group.add_task(task)
+            self.tasks.append(task)
+            self.task_added.emit(task)
+        return len(restored), ignored
+
+    def _reconcile_restored_task(self, task: TaskInfo) -> bool:
+        """将中断与失效的输出调整为可重试状态。"""
+        changed = False
+        valid = {STEP_PENDING, STEP_RUNNING, STEP_DONE, STEP_FAILED, STEP_SKIPPED}
+        for step in (1, 2, 3):
+            status = task.step_status(step)
+            output = task.step1_output if step == 1 else task.step2_output if step == 2 else task.step3_output
+            available = os.path.isdir(output) if step == 2 else os.path.isfile(output)
+            if status not in valid or status == STEP_RUNNING or (status in (STEP_DONE, STEP_SKIPPED) and not available):
+                task.set_step_status(step, STEP_PENDING)
+                task.set_step_output(step, "")
+                if status == STEP_RUNNING:
+                    task.set_step_error(step, "上次运行中断，可重新执行")
+                changed = True
+        if task.step2_status in (STEP_DONE, STEP_SKIPPED) and not task.custom_mix_folder:
+            if self.tts_config is not None and not profile_matches(task.step2_output, self.tts_config):
+                task.step2_status = STEP_PENDING
+                task.step2_output = ""
+                task.force_remix = True
+                changed = True
+        if task.step1_status not in (STEP_DONE, STEP_SKIPPED) and not task.custom_mix_folder:
+            if task.step2_status in (STEP_DONE, STEP_SKIPPED):
+                task.step2_status = STEP_PENDING
+                task.step2_output = ""
+                changed = True
+        if task.step2_status not in (STEP_DONE, STEP_SKIPPED):
+            if task.step3_status in (STEP_DONE, STEP_SKIPPED):
+                task.step3_status = STEP_PENDING
+                task.step3_output = ""
+                changed = True
+            if task._detect_mix_output() and not task.force_remix:
+                task.force_remix = True
+                changed = True
+        return changed
 
     def add_task(self, source_path: str,
                  subtitle_path: str = "", mix_folder: str = "",
@@ -346,7 +461,8 @@ class TaskQueue(QObject):
         group_id 非空时任务加入对应文件夹组，并自动标记 from_folder。
         """
         task = create_task(self.workspace_root, source_path,
-                           subtitle_path=subtitle_path, mix_folder=mix_folder)
+                           subtitle_path=subtitle_path, mix_folder=mix_folder,
+                           tts_config=self.tts_config)
         if group_id:
             group = self.get_group(group_id)
             if group:
@@ -354,15 +470,18 @@ class TaskQueue(QObject):
                 task.from_folder = True
                 task.import_folder = group.folder_path
                 group.add_task(task)
-        # 按 source_name 自然顺序找到插入位置
+        # 按 source_name 自然顺序找到插入位置（二分查找：
+        # 任务量大时避免每次插入都线性全扫已有任务）
         new_key = _natural_key(task.source_name)
-        insert_idx = 0
-        for i, t in enumerate(self.tasks):
-            if _natural_key(t.source_name) <= new_key:
-                insert_idx = i + 1
+        lo, hi = 0, len(self.tasks)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if _natural_key(self.tasks[mid].source_name) <= new_key:
+                lo = mid + 1
             else:
-                break
-        self.tasks.insert(insert_idx, task)
+                hi = mid
+        self.tasks.insert(lo, task)
+        task.save()
         self.task_added.emit(task)
         return task
 
@@ -372,6 +491,8 @@ class TaskQueue(QObject):
         """递归扫描文件夹中的媒体文件，返回绝对路径列表（自然排序）。"""
         media = []
         for root, dirs, files in os.walk(folder):
+            # 默认混音输出位于源目录的“双语/”内；重复导入时不能再当源媒体。
+            dirs[:] = [d for d in dirs if d != "双语"]
             for f in files:
                 if os.path.splitext(f)[1].lower() in TaskQueue.VIDEO_EXTS:
                     media.append(os.path.join(root, f))
@@ -421,7 +542,7 @@ class TaskQueue(QObject):
                 task.set_step_status(s, STEP_PENDING)
         task.set_step_output(1, "")
         task.set_step_error(1, "")
-        task.apply_custom_inputs()
+        task.apply_custom_inputs(self.tts_config)
         self.update_task(task)
 
     def set_task_custom_mix_folder(self, task_id: str, mix_folder: str):
@@ -437,7 +558,7 @@ class TaskQueue(QObject):
         if task.step3_status not in (STEP_DONE,):
             task.step3_status = STEP_PENDING
             task.step3_output = ""
-        task.apply_custom_inputs()
+        task.apply_custom_inputs(self.tts_config)
         self.update_task(task)
 
     def remove_task(self, task_id: str):
@@ -445,6 +566,7 @@ class TaskQueue(QObject):
         for i, t in enumerate(self.tasks):
             if t.task_id == task_id:
                 self.tasks.pop(i)
+                t.forget()
                 # 同步从所属文件夹组移除
                 if t.group_id:
                     group = self.get_group(t.group_id)
@@ -456,10 +578,31 @@ class TaskQueue(QObject):
                     self.current_changed.emit(self._current)
                 break
 
-    def clear_all(self, delete_files: bool = False):
-        """清空所有任务。"""
+    def clear_all(self, delete_files: bool = False) -> int:
+        """清空所有任务。
+
+        Args:
+            delete_files: True 时同时删除各任务在 workspace 下的任务目录
+                （含 task.json）。混音输出与语音缓存按内容寻址、可被其他
+                任务复用，不在删除范围内。
+
+        Returns:
+            实际删除的任务目录数（delete_files=False 时为 0）。
+        """
         removed_ids = [t.task_id for t in self.tasks]
         removed_group_ids = [g.group_id for g in self.groups]
+        deleted_dirs = 0
+        if delete_files:
+            for task in self.tasks:
+                task_dir = task.task_dir
+                if os.path.isdir(task_dir):
+                    try:
+                        shutil.rmtree(task_dir)
+                        deleted_dirs += 1
+                    except Exception:
+                        pass
+        for task in self.tasks:
+            task.forget()
         self.tasks.clear()
         self.groups.clear()
         self._current = None
@@ -468,6 +611,7 @@ class TaskQueue(QObject):
         for gid in removed_group_ids:
             self.group_removed.emit(gid)
         self.current_changed.emit(None)
+        return deleted_dirs
 
     def get_task(self, task_id: str) -> Optional[TaskInfo]:
         for t in self.tasks:

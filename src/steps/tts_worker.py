@@ -9,6 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from .tts_cache import AudioCache
 from .tts_logger import logger
+from .tts_profile import profile_matches, save_profile
 from .tts_utils import (
     set_sleep_mode,
     generate_filename,
@@ -32,6 +33,12 @@ def format_eta(seconds):
         return f"{minutes}分{secs}秒"
     else:
         return f"{secs}秒"
+
+
+# Edge 模式停止时，等待共享线程池中已开始任务跑完的宽限期（秒）。
+# 单个 edge_tts_task 的超时是 15s，留出余量；超时后仍未完成的任务
+# 会在 audio_cache 关闭后重连 sqlite（功能不受影响，仅多一条短命连接）。
+EDGE_DRAIN_TIMEOUT = 20
 
 
 class TTSWorker(QThread):
@@ -71,7 +78,13 @@ class TTSWorker(QThread):
         with self.pause_lock:
             return self.paused
 
+    def _finish_generation(self, success, task_dir):
+        if success:
+            save_profile(task_dir, self.config)
+        self.finished_signal.emit(success)
+
     def run(self):
+        self._read_failures = 0
         prevent_sleep = self.config.get("prevent_sleep", True)
         if prevent_sleep:
             set_sleep_mode(True)
@@ -109,6 +122,7 @@ class TTSWorker(QThread):
                             lines = f.readlines()
                     except Exception as e:
                         self.log_signal.emit(f"读取文件失败 {lrc_path}: {e}")
+                        self._read_failures += 1
                         continue
 
                 idx = 1
@@ -262,10 +276,11 @@ class TTSWorker(QThread):
             completed_weight = 0
 
             pending_tasks = []
+            reuse_existing = profile_matches(task_dir, self.config)
             for task in all_tasks:
                 idx, timestamp, text, save_dir, file_mtime = task
                 file_path = generate_filename(idx, timestamp, text, save_dir)
-                if os.path.exists(file_path):
+                if reuse_existing and os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
                     completed += 1
                     completed_weight += len(text)
                     self.progress_signal.emit(completed)
@@ -297,7 +312,7 @@ class TTSWorker(QThread):
             if tts_mode == "edge":
                 if len(pending_tasks) == 0:
                     self.log_signal.emit("所有文件已存在，无需处理")
-                    self.finished_signal.emit(True)
+                    self._finish_generation(self._read_failures == 0 and not self.stop_flag, task_dir)
                     return
                 self._run_edge_tts(pending_tasks, completed, completed_weight, start_time, subtitle_md5, task_dir)
             else:
@@ -316,7 +331,7 @@ class TTSWorker(QThread):
 
                 if len(pending_tasks) == 0:
                     self.log_signal.emit("所有文件已存在，无需处理")
-                    self.finished_signal.emit(True)
+                    self._finish_generation(self._read_failures == 0 and not self.stop_flag, task_dir)
                     return
 
                 self._run_api_tts(pending_tasks, completed, completed_weight, start_time, subtitle_md5, task_dir)
@@ -378,6 +393,7 @@ class TTSWorker(QThread):
 
         total = len(pending_tasks)
         pending_completed = 0
+        failures = 0
         progress_lock = threading.Lock()
 
         def process_task(task):
@@ -387,56 +403,71 @@ class TTSWorker(QThread):
             )
 
         futures = {}
-        for task in pending_tasks:
-            if self.stop_flag:
-                break
-
-            while self.is_paused():
+        try:
+            for task in pending_tasks:
                 if self.stop_flag:
                     break
-                time.sleep(0.1)
 
-            if self.stop_flag:
-                break
+                while self.is_paused():
+                    if self.stop_flag:
+                        break
+                    time.sleep(0.1)
 
-            future = executor.submit(process_task, task)
-            futures[future] = task
+                if self.stop_flag:
+                    break
 
-        for future in concurrent.futures.as_completed(futures):
-            if self.stop_flag:
-                break
+                future = executor.submit(process_task, task)
+                futures[future] = task
 
-            task = futures[future]
-            try:
-                success, msg = future.result()
-                self.log_signal.emit(msg)
-            except Exception as e:
-                self.log_signal.emit(f"异常: {task[2][:10]}... - {e}")
+            for future in concurrent.futures.as_completed(futures):
+                if self.stop_flag:
+                    break
 
-            with progress_lock:
-                completed += 1
-                completed_weight += len(task[2])
-                pending_completed += 1
-                self.progress_signal.emit(completed)
-                self.weight_progress_signal.emit(completed_weight)
+                task = futures[future]
+                try:
+                    success, msg = future.result()
+                    self.log_signal.emit(msg)
+                except Exception as e:
+                    success = False
+                    self.log_signal.emit(f"异常: {task[2][:10]}... - {e}")
+                if not success:
+                    failures += 1
 
-                elapsed = time.time() - start_time
-                if pending_completed > 0:
-                    avg_time = elapsed / pending_completed
-                    remaining = avg_time * (total - pending_completed)
-                    self.eta_signal.emit(format_eta(remaining))
+                with progress_lock:
+                    completed += 1
+                    completed_weight += len(task[2])
+                    pending_completed += 1
+                    self.progress_signal.emit(completed)
+                    self.weight_progress_signal.emit(completed_weight)
 
-        self.log_signal.emit("全部任务完成")
-        self.log_signal.emit(f"任务ID: {task_id}")
-        self.log_signal.emit(f"任务文件保存位置: {task_dir}")
+                    elapsed = time.time() - start_time
+                    if pending_completed > 0:
+                        avg_time = elapsed / pending_completed
+                        remaining = avg_time * (total - pending_completed)
+                        self.eta_signal.emit(format_eta(remaining))
 
-        final_stats = self.audio_cache.get_cache_stats()
-        self.log_signal.emit(
-            f"最终缓存统计: {final_stats['total_count']} 条记录, "
-            f"累计复用 {final_stats['total_reuse']} 次"
-        )
+            self.log_signal.emit("全部任务完成")
+            self.log_signal.emit(f"任务ID: {task_id}")
+            self.log_signal.emit(f"任务文件保存位置: {task_dir}")
 
-        self.finished_signal.emit(True)
+            final_stats = self.audio_cache.get_cache_stats()
+            self.log_signal.emit(
+                f"最终缓存统计: {final_stats['total_count']} 条记录, "
+                f"累计复用 {final_stats['total_reuse']} 次"
+            )
+
+            if failures:
+                self.log_signal.emit(f"语音生成失败 {failures}/{total} 个片段")
+            self._finish_generation(failures == 0 and not self.stop_flag and self._read_failures == 0, task_dir)
+        finally:
+            # 无论正常完成还是中途停止：先取消尚未开始的任务，再给已开始的
+            # 任务一个宽限期跑完。否则共享线程池内的残留任务会在 run() 的
+            # finally 关闭 audio_cache 之后继续读写 sqlite
+            # （Cannot operate on a closed database）。
+            for f in futures:
+                f.cancel()
+            if futures:
+                concurrent.futures.wait(futures, timeout=EDGE_DRAIN_TIMEOUT)
 
     def _run_api_tts(self, pending_tasks, completed, completed_weight, start_time, task_id, task_dir):
         use_bulk = self.config.get("use_bulk_api", True)
@@ -460,6 +491,7 @@ class TTSWorker(QThread):
 
         total = len(pending_tasks)
         pending_completed = 0
+        failures = 0
         progress_lock = threading.Lock()
 
         def collect_micro_batch():
@@ -485,7 +517,9 @@ class TTSWorker(QThread):
             return batch
 
         def worker(api_config):
-            nonlocal completed, pending_completed
+            # completed_weight 同样在函数内自增，必须一并声明 nonlocal，
+            # 否则会被判定为 worker 的局部变量，首次 += 即 UnboundLocalError
+            nonlocal completed, completed_weight, pending_completed, failures
             while True:
                 if self.stop_flag:
                     break
@@ -530,6 +564,9 @@ class TTSWorker(QThread):
                             else:
                                 success, msg = result
                             self.log_signal.emit(f"[{api_config['name']}] {msg}")
+                            if not success:
+                                with progress_lock:
+                                    failures += 1
                     else:
                         for task in batch:
                             if self.stop_flag:
@@ -546,6 +583,9 @@ class TTSWorker(QThread):
                                 file_mtime,
                             )
                             self.log_signal.emit(f"[{api_config['name']}] {msg}")
+                            if not success:
+                                with progress_lock:
+                                    failures += 1
 
                     with progress_lock:
                         completed += len(batch)
@@ -562,6 +602,10 @@ class TTSWorker(QThread):
                             self.eta_signal.emit("计算中...")
 
                     batch_done = True
+                except Exception as e:
+                    with progress_lock:
+                        failures += len(batch)
+                    self.log_signal.emit(f"[{api_config['name']}] 片段处理异常: {e}")
                 finally:
                     for _ in batch:
                         task_queue.task_done()
@@ -575,10 +619,17 @@ class TTSWorker(QThread):
             threads.append(thread)
             thread.start()
 
-        task_queue.join()
-
         for thread in threads:
-            thread.join(timeout=1)
+            thread.join()
+        # 停止时队列里可能还有未领取片段；线程已退出即可安全清空。
+        abandoned = 0
+        while True:
+            try:
+                task_queue.get_nowait()
+                task_queue.task_done()
+                abandoned += 1
+            except queue.Empty:
+                break
 
         self.log_signal.emit("全部任务完成")
         self.log_signal.emit(f"任务ID: {task_id}")
@@ -590,4 +641,6 @@ class TTSWorker(QThread):
             f"累计复用 {final_stats['total_reuse']} 次"
         )
 
-        self.finished_signal.emit(True)
+        if failures or abandoned:
+            self.log_signal.emit(f"语音生成失败或未处理 {failures + abandoned}/{total} 个片段")
+        self._finish_generation(failures == 0 and abandoned == 0 and not self.stop_flag and self._read_failures == 0, task_dir)

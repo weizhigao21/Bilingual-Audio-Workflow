@@ -6,6 +6,7 @@ import requests
 import shutil
 import asyncio
 import threading
+import tempfile
 import edge_tts
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .tts_logger import logger
@@ -14,8 +15,29 @@ ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
-# 复用HTTP会话
-_session = requests.Session()
+# 复用HTTP会话（线程本地）：requests.Session 并非线程安全，
+# 批量下载（5 线程）与多 API worker 并发共用同一 Session 会竞争
+# 底层连接池，高并发下可能出现连接被并发使用导致的异常。
+_thread_local = threading.local()
+
+
+def _get_session() -> requests.Session:
+    """返回当前线程专属的 requests.Session（惰性创建）。"""
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        _thread_local.session = session
+    return session
+
+
+def _safe_unlink(path):
+    """尽力删除临时文件，失败仅记日志不抛出。"""
+    try:
+        if path and os.path.exists(path):
+            os.unlink(path)
+    except Exception as e:
+        logger.warning(f"临时文件删除失败: {path} - {e}")
+
 
 # ---------- Edge TTS 全局并发限流 ----------
 # 多个任务并行合成时（如流水线模式），每个 TTSWorker 内部又有多个线程并发，
@@ -98,7 +120,8 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
     file_name = os.path.basename(save_path)
 
     source_version = str(int(source_mtime))
-    cached_path = audio_cache.get_cached_audio(text, model_name, source_version)
+    cache_model = f"{model_name}|{api_url.rstrip('/')}"
+    cached_path = audio_cache.get_cached_audio(text, cache_model, source_version)
     if cached_path:
         try:
             shutil.copy2(cached_path, save_path)
@@ -136,16 +159,13 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
 
     try:
         logger.debug(f"调用API: {api_endpoint}, 文本: {text[:20]}...")
-        resp = _session.post(api_endpoint, json=payload, timeout=60)
+        resp = _get_session().post(api_endpoint, json=payload, timeout=60)
         resp.raise_for_status()
         res_data = resp.json()
         if "audio_url" in res_data:
             audio_url = res_data["audio_url"]
-            audio_resp = _session.get(audio_url)
-            with open(save_path, "wb") as f:
-                f.write(audio_resp.content)
-
-            audio_cache.save_audio_cache(text, save_path, model_name, api_url, source_version=source_version)
+            _download_audio(audio_url, save_path)
+            audio_cache.save_audio_cache(text, save_path, cache_model, api_url, source_version=source_version)
             logger.info(f"完成: {file_name}")
             return True, f"完成: {file_name}"
         logger.warning(f"API返回错误: {res_data.get('msg', '无返回URL')}")
@@ -162,17 +182,26 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
 
 
 def _download_audio(audio_url, save_path, timeout=60):
-    audio_resp = _session.get(audio_url, timeout=timeout)
+    audio_resp = _get_session().get(audio_url, timeout=timeout)
     audio_resp.raise_for_status()
-    with open(save_path, "wb") as f:
-        f.write(audio_resp.content)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(save_path),
+                                         prefix=".tts-", suffix=".wav", delete=False) as tmp:
+            temp_path = tmp.name
+            tmp.write(audio_resp.content)
+        if os.path.getsize(temp_path) == 0:
+            raise ValueError("服务器返回空音频")
+        os.replace(temp_path, save_path)
+    finally:
+        _safe_unlink(temp_path)
 
 
 def test_api_server(url, timeout=5):
     """测试 API 服务器是否可用。返回 (ok, msg)。"""
     api_base_url = url.rstrip("/")
     try:
-        resp = _session.get(api_base_url, timeout=timeout)
+        resp = _get_session().get(api_base_url, timeout=timeout)
         if resp.status_code == 200:
             return True, "连接成功"
         return False, f"HTTP {resp.status_code}"
@@ -195,7 +224,8 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
         file_name = os.path.basename(save_path)
 
         source_version = str(int(file_mtime))
-        cached_path = audio_cache.get_cached_audio(text, model_name, source_version)
+        cache_model = f"{model_name}|{api_url.rstrip('/')}"
+        cached_path = audio_cache.get_cached_audio(text, cache_model, source_version)
         if cached_path:
             try:
                 shutil.copy2(cached_path, save_path)
@@ -241,7 +271,7 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
 
     try:
         logger.debug(f"批量API请求: {api_endpoint}, 文本数: {len(texts)}")
-        resp = _session.post(api_endpoint, json=payload, timeout=300)
+        resp = _get_session().post(api_endpoint, json=payload, timeout=300)
         resp.raise_for_status()
         res_data = resp.json()
 
@@ -263,7 +293,7 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
                     source_version = str(int(file_mtime))
                     try:
                         future.result()
-                        audio_cache.save_audio_cache(text, save_path, model_name, api_url, source_version=source_version)
+                        audio_cache.save_audio_cache(text, save_path, cache_model, api_url, source_version=source_version)
                         results[uncached_indices[i]] = (True, f"批量完成: {file_name}")
                     except Exception as e:
                         logger.error(f"下载音频失败: {file_name} - {e}")
@@ -307,7 +337,7 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
     file_name = os.path.basename(save_path)
 
     source_version = str(int(source_mtime))
-    cache_key = f"{text}|{voice}"
+    cache_key = f"{text}|{voice}|{rate}|{volume}"
     cached_path = audio_cache.get_cached_audio(cache_key, "edge_tts", source_version)
     if cached_path:
         try:
@@ -322,9 +352,9 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
     _edge_acquire()
     try:
         for attempt in range(1, max_retries + 1):
+            temp_path = save_path.replace(".wav", ".mp3")
             try:
                 logger.debug(f"Edge TTS生成 (尝试 {attempt}/{max_retries}): 声音={voice}, 文本={text[:20]}...")
-                temp_path = save_path.replace(".wav", ".mp3")
                 asyncio.run(asyncio.wait_for(
                     _edge_tts_generate(text, voice, rate, volume, temp_path),
                     timeout=15
@@ -338,9 +368,12 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
             except asyncio.TimeoutError:
                 last_error = "超时"
                 logger.warning(f"Edge TTS超时 (尝试 {attempt}/{max_retries}): {file_name}")
+                # 超时取消时 save() 可能已创建部分文件，清理后重试
+                _safe_unlink(temp_path)
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {e}")
+                _safe_unlink(temp_path)
             if attempt < max_retries:
                 time.sleep(1)
 

@@ -7,6 +7,8 @@
 import os
 import sys
 import json
+import copy
+import tempfile
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -83,11 +85,14 @@ DEFAULT_CONFIG = {
         "align_onset": True,
         "content_alignment": False,
         "auto_volume": "fixed",
+        "peak_mode": "peak",
+        "high_quality_resample": True,
         "add_suffix": True,
         "skip_existing": True,
         "output_folder": "",
         "output_folder_prefix": False,
         "thread_count": 4,
+        "streaming_threshold_minutes": 20,
         "enable_batch_parallel": True,
         "folder_prefix": True,
         "channel_map": {"left": 155, "right": 25, "both": 135},
@@ -110,7 +115,9 @@ class WorkflowConfig:
     """工作流配置管理器。"""
 
     def __init__(self):
-        self.config = dict(DEFAULT_CONFIG)
+        # 必须深拷贝：dict() 浅拷贝会与 DEFAULT_CONFIG 共享嵌套字典，
+        # 后续任何对 config 嵌套结构的写入都会污染模块级默认值
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
         self._load()
         # 确保工作区目录存在
         ws_dir = self.config.get("workspace_dir", "")
@@ -130,8 +137,17 @@ class WorkflowConfig:
     def save(self):
         path = get_config_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.config, f, ensure_ascii=False, indent=2)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                             dir=os.path.dirname(path), prefix=".config-",
+                                             suffix=".json", delete=False) as f:
+                temp_path = f.name
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, path)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
     def is_configured(self) -> bool:
         """检查字幕提取项目路径是否已正确配置。"""

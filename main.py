@@ -33,8 +33,9 @@ from PyQt6.QtGui import QIcon
 from src.crash_log import install as install_crash_log
 from src.workflow_gui import WorkflowMainWindow
 from src.config import WorkflowConfig
+from src.version import APP_VERSION
 
-VERSION = "v2.1.0"
+VERSION = APP_VERSION
 
 _ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "resources", "configs", "ui.ico")
