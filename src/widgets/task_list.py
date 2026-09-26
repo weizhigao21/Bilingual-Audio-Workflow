@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """左侧任务列表（树形）组件。"""
+import os
 from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QMenu, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction
 
-from ..task_manager import TaskInfo, TaskGroup, STEP_DONE, STEP_FAILED, STEP_RUNNING
+from ..task_manager import (
+    TaskInfo, TaskGroup, STEP_DONE, STEP_FAILED, STEP_RUNNING, STEP_SKIPPED,
+)
 from .common import _natural_sort_key
 
 
@@ -21,6 +24,7 @@ class TaskListWidget(QTreeWidget):
     task_selected = pyqtSignal(str)   # task_id
     task_remove_requested = pyqtSignal(str)
     task_rerun_requested = pyqtSignal(str, int)  # (task_id, step)
+    metadata_edit_requested = pyqtSignal(str)  # task_id
     group_selected = pyqtSignal(str)  # group_id
     group_remove_requested = pyqtSignal(str)
     group_rerun_requested = pyqtSignal(str, int)  # (group_id, step)
@@ -238,6 +242,15 @@ class TaskListWidget(QTreeWidget):
                 menu.addAction(act)
         else:
             task_id = item_id
+            task = self._task_queue.get_task(task_id) if self._task_queue else None
+            if (task and task.step3_status in (STEP_DONE, STEP_SKIPPED)
+                    and os.path.isfile(task.step3_output)):
+                act_metadata = QAction("编辑混音成品信息…", self)
+                act_metadata.triggered.connect(
+                    lambda: self.metadata_edit_requested.emit(task_id)
+                )
+                menu.addAction(act_metadata)
+                menu.addSeparator()
             act_remove = QAction("移除任务", self)
             act_remove.triggered.connect(
                 lambda: self.task_remove_requested.emit(task_id)

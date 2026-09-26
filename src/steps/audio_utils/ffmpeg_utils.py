@@ -37,7 +37,8 @@ def resample_audio(audio, sample_rate, stop_check=None, high_quality=True):
 
 def export_audio_ffmpeg(audio_segment, output_path, format_type="mp3",
                         bitrate="192k", sample_rate=44100, channels=2,
-                        stop_check=None, high_quality=True):
+                        stop_check=None, high_quality=True,
+                        metadata_options=()):
     codecs = {"mp3": ("libmp3lame", "mp3"), "m4a": ("aac", "ipod"),
               "aac": ("aac", "adts"), "mp4": ("aac", "mp4"),
               "ogg": ("libvorbis", "ogg")}
@@ -47,7 +48,9 @@ def export_audio_ffmpeg(audio_segment, output_path, format_type="mp3",
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + _pcm_input(audio_segment) + [
         "-vn", "-c:a", codec, "-b:a", bitrate,
         "-af", _resample_filter(high_quality),
-        "-ar", str(sample_rate), "-ac", str(channels), "-f", muxer, output_path,
+        "-ar", str(sample_rate), "-ac", str(channels), "-f", muxer,
+    ] + list(metadata_options) + [
+        output_path,
     ]
     _run_ffmpeg(cmd, stop_check=stop_check, input_data=audio_segment.raw_data)
 
@@ -86,7 +89,7 @@ def decode_audio_to_pcm(source_path, output_path, stop_check=None):
 
 def export_pcm_file(pcm_path, video_path, output_path, format_type,
                     source_rate, bitrate, sample_rate, channels,
-                    high_quality=True, stop_check=None):
+                    high_quality=True, stop_check=None, metadata_options=()):
     """从磁盘 PCM 编码；视频输出复制画面，其他格式只写音频。"""
     input_args = ["-f", "s32le", "-ar", str(source_rate), "-ac", "2", "-i", pcm_path]
     if video_path and format_type == "mp4":
@@ -94,7 +97,9 @@ def export_pcm_file(pcm_path, video_path, output_path, format_type,
                "-i", video_path] + input_args + [
             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
             "-b:a", bitrate, "-af", _resample_filter(high_quality),
-            "-ar", str(sample_rate), "-ac", str(channels), "-shortest", output_path,
+            "-ar", str(sample_rate), "-ac", str(channels), "-shortest",
+        ] + list(metadata_options) + [
+            output_path,
         ]
     else:
         codec, muxer = {"mp3": ("libmp3lame", "mp3"), "m4a": ("aac", "ipod"),
@@ -103,7 +108,9 @@ def export_pcm_file(pcm_path, video_path, output_path, format_type,
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + input_args + [
             "-vn", "-c:a", codec, "-b:a", bitrate,
             "-af", _resample_filter(high_quality), "-ar", str(sample_rate),
-            "-ac", str(channels), "-f", muxer, output_path,
+            "-ac", str(channels), "-f", muxer,
+        ] + list(metadata_options) + [
+            output_path,
         ]
     _run_ffmpeg(cmd, stop_check=stop_check)
 
@@ -154,7 +161,8 @@ def extract_audio_from_video(video_path, stop_check=None):
 
 def replace_audio_in_video(video_path, audio_source, output_path,
                            bitrate="192k", sample_rate=44100, channels=2,
-                           stop_check=None, high_quality=True):
+                           stop_check=None, high_quality=True,
+                           metadata_options=()):
     """复制视频码流并替换音轨；PCM 管道保留输入位深。"""
     if isinstance(audio_source, str):
         input_args, input_data = ["-i", audio_source], None
@@ -164,7 +172,9 @@ def replace_audio_in_video(video_path, audio_source, output_path,
         "-c:v", "copy", "-c:a", "aac", "-b:a", bitrate,
         "-af", _resample_filter(high_quality),
         "-ar", str(sample_rate), "-ac", str(channels),
-        "-map", "0:v:0", "-map", "1:a:0", "-shortest", output_path,
+        "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+    ] + list(metadata_options) + [
+        output_path,
     ]
     _run_ffmpeg(cmd, stop_check=stop_check, input_data=input_data)
 

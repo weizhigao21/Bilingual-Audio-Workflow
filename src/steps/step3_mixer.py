@@ -31,6 +31,7 @@ from .audio_utils import (
 )
 from .audio_utils.ffmpeg_utils import probe_audio
 from .stream_mixer import mix_streaming_task
+from .audio_metadata import metadata_args, read_editable_tags, write_provenance
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"}
@@ -144,6 +145,9 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         _log(f"[音频混音] 已存在，跳过: {final_output}")
         _progress(100)
         return True, final_output
+
+    tags = read_editable_tags(final_output, fallback_title=task.source_name)
+    metadata_options = metadata_args(tags)
 
     # 长音频避免 AudioSegment.from_file 一次解码整段并物化多个全长数组。
     threshold = max(0, int(cfg.get("streaming_threshold_minutes", 20)))
@@ -282,6 +286,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                 original_path, original_audio, export_output,
                 bitrate=bitrate, sample_rate=sample_rate, channels=channels,
                 stop_check=stop_check, high_quality=high_quality,
+                metadata_options=metadata_options,
             )
         elif output_format == "wav":
             original_audio = resample_audio(original_audio, sample_rate, stop_check, high_quality)
@@ -297,6 +302,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                 original_audio, export_output, output_format,
                 bitrate=bitrate, sample_rate=sample_rate, channels=channels,
                 stop_check=stop_check, high_quality=high_quality,
+                metadata_options=metadata_options,
             )
         _cleanup(temp_audio_path)
         if _stopped():
@@ -305,6 +311,10 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         os.replace(export_output, final_output)
         export_output = None
         task.force_remix = False
+        try:
+            write_provenance(final_output, task, cfg, tags)
+        except OSError as exc:
+            _log(f"[音频混音] 警告：制作记录写入失败: {exc}")
 
         _progress(100)
         _log(f"[音频混音] 完成: {final_output}")

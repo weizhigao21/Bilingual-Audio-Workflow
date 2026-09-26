@@ -14,6 +14,7 @@ from pydub import AudioSegment
 from src.steps.step3_mixer import mix_single_task
 from src.task_manager import TaskInfo
 from src.steps.audio_utils import clear_mix_cache
+from src.version import APP_VERSION
 
 
 def make_wav(path, seconds, rate, amplitude, channels=2):
@@ -91,10 +92,11 @@ class StreamingTests(unittest.TestCase):
         source_info=json.loads(subprocess.check_output([
             'ffprobe','-v','error','-show_streams','-of','json',str(video)]))
         output_info=json.loads(subprocess.check_output([
-            'ffprobe','-v','error','-show_streams','-of','json',path]))
+            'ffprobe','-v','error','-show_streams','-show_format','-of','json',path]))
         self.assertEqual(source_info['streams'][0]['codec_name'],
                          output_info['streams'][0]['codec_name'])
         self.assertEqual(output_info['streams'][1]['codec_name'],'aac')
+        self.assertIn(APP_VERSION, output_info['format']['tags']['comment'])
         self.assertEqual(list(self.root.glob('.mix-*')),[])
 
     def test_export_error_keeps_existing_output_and_cleans_spool(self):

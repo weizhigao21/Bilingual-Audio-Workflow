@@ -153,6 +153,10 @@ class WorkflowMainWindow(
                 mixer_config_btn = panel.add_extra_button("混音配置...")
                 mixer_config_btn.setToolTip("设置导出格式、音量、声道检测等参数")
                 mixer_config_btn.clicked.connect(self._on_open_mixer_config)
+                self.metadata_btn = panel.add_extra_button("编辑成品信息...")
+                self.metadata_btn.setToolTip("修改混音成品的标题、艺术家、专辑和备注")
+                self.metadata_btn.setEnabled(False)
+                self.metadata_btn.clicked.connect(self._on_edit_current_metadata)
             # 步骤1面板内加"字幕配置"按钮
             if step == 1:
                 whisper_config_btn = panel.add_extra_button("字幕配置...")
@@ -178,6 +182,7 @@ class WorkflowMainWindow(
         self.task_list.task_selected.connect(self._on_task_selected)
         self.task_list.task_remove_requested.connect(self._on_task_remove)
         self.task_list.task_rerun_requested.connect(self._on_task_rerun)
+        self.task_list.metadata_edit_requested.connect(self._on_edit_metadata)
         self.task_list.group_selected.connect(self._on_group_selected)
         self.task_list.group_remove_requested.connect(self._on_group_remove)
         self.task_list.group_rerun_requested.connect(self._on_group_rerun)

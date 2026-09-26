@@ -10,6 +10,7 @@ from .audio_utils import detect_angles_parallel, get_mix_audio_files, mix_with_n
 from .audio_utils.ffmpeg_utils import (
     decode_audio_to_pcm, export_pcm_file, export_pcm_wav,
 )
+from .audio_metadata import metadata_args, read_editable_tags, write_provenance
 
 
 def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
@@ -33,6 +34,7 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
         return False, f"配音目录无有效文件: {task.step2_output}"
     output_folder = os.path.dirname(final_output)
     output_format = os.path.splitext(final_output)[1].lstrip('.').lower()
+    tags = read_editable_tags(final_output, fallback_title=task.source_name)
     export_path = None
     try:
         log(f"[音频混音] 启用长音频分块处理: {duration / 60:.1f} 分钟")
@@ -103,11 +105,16 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
                     mixed_pcm, task.source_path if is_video else None,
                     export_path, output_format, source_rate, bitrate, output_rate,
                     channels, high_quality=high_quality, stop_check=stop_check,
+                    metadata_options=metadata_args(tags),
                 )
             check_stop()
             os.replace(export_path, final_output)
             export_path = None
             task.force_remix = False
+            try:
+                write_provenance(final_output, task, cfg, tags)
+            except OSError as exc:
+                log(f"[音频混音] 警告：制作记录写入失败: {exc}")
             progress(100)
             log(f"[音频混音] 完成: {final_output}")
             return True, final_output
