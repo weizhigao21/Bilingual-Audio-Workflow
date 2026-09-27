@@ -80,6 +80,7 @@ class BatchMixin:
         for p in self.step_panels.values():
             p.progress.setRange(0, 100)
             p.progress.setValue(0)
+            p.set_detail("")
         self._batch_executor = BatchExecutor(
             list(self.task_queue.tasks), steps, self.config,
             order=order, parent=self
@@ -133,6 +134,7 @@ class BatchMixin:
                 self._refresh_step_panels(task)
 
     def _on_batch_finished(self, success: int, fail: int, skipped: int):
+        self.step_panels[2].set_detail("")
         self._batch_executor = None
         self.batch_btn.setEnabled(True)
         self.batch_stop_btn.setEnabled(False)

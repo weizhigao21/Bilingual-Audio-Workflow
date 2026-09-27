@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """单个步骤的面板组件。"""
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QColor
 
 from ..task_manager import STEP_PENDING
@@ -41,6 +41,14 @@ class StepPanel(QFrame):
         self.progress.setFormat("%p%")
         layout.addWidget(self.progress)
 
+        # 语音生成的片段/剩余时间信息单独显示，避免挤占百分比。
+        self.detail_label = QLabel("")
+        self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.detail_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.hide()
+        layout.addWidget(self.detail_label)
+
         # 输出路径
         self.output_label = QLabel("输出：—")
         self.output_label.setStyleSheet("color: #666; font-size: 11px;")
@@ -73,6 +81,10 @@ class StepPanel(QFrame):
         self.progress.setRange(0, maximum)
         self.progress.setValue(value)
 
+    def set_detail(self, text: str):
+        self.detail_label.setText(text)
+        self.detail_label.setVisible(bool(text))
+
     def set_output(self, path: str):
         if path:
             display = path if len(path) < 80 else "..." + path[-77:]
@@ -89,5 +101,7 @@ class StepPanel(QFrame):
         self.set_status(STEP_PENDING)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        self.set_detail("")
         self.set_output("")
         self.set_running(False)

@@ -136,9 +136,11 @@ class TaskMixin:
             elif status == STEP_RUNNING:
                 pass
             elif status in (STEP_DONE, STEP_SKIPPED):
+                panel.set_detail("")
                 panel.progress.setRange(0, 100)
                 panel.progress.setValue(100)
             else:
+                panel.set_detail("")
                 panel.progress.setRange(0, 100)
                 panel.progress.setValue(0)
 

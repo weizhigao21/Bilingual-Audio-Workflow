@@ -1,4 +1,4 @@
-# 双语音声工作流 v2.1.13
+# 双语音声工作流 v2.1.14
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
@@ -186,6 +186,9 @@ TTS 合成结果按 **文本、声音/模型、生成设置及 API 来源** 区�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v2.1.14 (2026-09-27)
+- 语音生成的当前文件、片段进度和剩余时间改为显示在进度条下方，进度条只显示百分比；重新开始或结束时清除旧状态
 
 ### v2.1.13 (2026-09-27)
 - 字幕进度按整批文件数和当前音频时间轴计算，跨文件识别时不再反复跳满、回退；进度条显示当前文件序号、识别位置，界面日志收起大量 VAD 和逐句输出

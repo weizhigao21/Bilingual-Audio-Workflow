@@ -75,6 +75,7 @@ class StepMixin:
         # 启动前重置该步骤进度条（TTS 的 total 信号会随后调整上限）
         self.step_panels[step].progress.setRange(0, 100)
         self.step_panels[step].progress.setValue(0)
+        self.step_panels[step].set_detail("")
         self._refresh_step_panels(task)
         worker.start()
 
@@ -114,6 +115,7 @@ class StepMixin:
         for p in self.step_panels.values():
             p.progress.setRange(0, 100)
             p.progress.setValue(0)
+            p.set_detail("")
         self._batch_executor = BatchExecutor(
             list(group.tasks), [step], self.config,
             order="by_step" if step == 1 else "by_task", parent=self
@@ -142,9 +144,13 @@ class StepMixin:
         panel.progress.setValue(max(0, min(100, value)))
 
     def _on_step_status(self, step: int, text: str):
-        """步骤内状态文本显示在进度条上（如"混音中 2/4 · 当前 xx.mp3"）。"""
+        """语音信息单独显示，其余步骤沿用进度条状态文本。"""
         panel = self.step_panels[step]
-        panel.progress.setFormat(f"{text}  |  %p%")
+        if step == 2:
+            panel.progress.setFormat("%p%")
+            panel.set_detail(text)
+        else:
+            panel.progress.setFormat(f"{text}  |  %p%")
 
     def _on_step_total(self, step: int, total: int):
         """步骤内总任务数（如 TTS 的总片段数），仅记录，进度条 range 恒为 0-100。"""
@@ -152,6 +158,7 @@ class StepMixin:
             self._tts_total = total
 
     def _on_step_finished(self, step: int, task: TaskInfo, success: bool, msg: str):
+        self.step_panels[step].set_detail("")
         if success:
             task.set_step_status(step, STEP_DONE)
             task.set_step_output(step, msg)
