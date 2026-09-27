@@ -87,6 +87,9 @@ class TaskInfo:
     step1_output: str = ""             # 字幕文件路径
     step2_output: str = ""             # 配音目录（task_id 子目录）
     step3_output: str = ""             # 混音输出文件
+    mix_metadata: dict = field(default_factory=dict)  # 无法嵌入的字段及重混音时沿用的编辑值
+    mix_version: str = ""               # 混音时的程序版本
+    mix_metadata_editor_version: str = ""  # 最近一次信息编辑的程序版本
 
     # 错误信息
     step1_error: str = ""
@@ -126,8 +129,8 @@ class TaskInfo:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def save(self):
-        """将任务状态持久化到 task.json。"""
+    def save(self) -> bool:
+        """将任务状态持久化到 task.json，返回是否保存成功。"""
         task_dir = self.task_dir
         if not os.path.exists(task_dir):
             os.makedirs(task_dir, exist_ok=True)
@@ -138,8 +141,10 @@ class TaskInfo:
                 temp_path = f.name
                 json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
             os.replace(temp_path, self.task_json_path)
+            return True
         except OSError as e:
             logging.getLogger(__name__).warning("保存任务状态失败: %s", e)
+            return False
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)

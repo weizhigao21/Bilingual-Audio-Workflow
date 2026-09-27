@@ -31,7 +31,7 @@ from .audio_utils import (
 )
 from .audio_utils.ffmpeg_utils import probe_audio
 from .stream_mixer import mix_streaming_task
-from .audio_metadata import mix_metadata_options, write_provenance
+from .audio_metadata import mix_metadata_options, remember_mix_metadata
 from .output_paths import planned_mix_output
 
 
@@ -293,9 +293,9 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         export_output = None
         task.force_remix = False
         try:
-            write_provenance(final_output, task, cfg, tags)
+            remember_mix_metadata(task, tags)
         except OSError as exc:
-            _log(f"[音频混音] 警告：制作记录写入失败: {exc}")
+            _log(f"[音频混音] 警告：任务记录写入失败: {exc}")
 
         _progress(100)
         _log(f"[音频混音] 完成: {final_output}")

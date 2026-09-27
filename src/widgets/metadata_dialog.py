@@ -46,7 +46,7 @@ class MetadataDialog(QDialog):
         self.setWindowTitle("编辑混音成品信息")
         self.setMinimumWidth(450)
 
-        tags = read_editable_tags(self.output_path, task.source_name)
+        tags = read_editable_tags(self.output_path, task.source_name, task)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(os.path.basename(self.output_path)))
         form = QFormLayout()
@@ -71,7 +71,7 @@ class MetadataDialog(QDialog):
             )
         else:
             self.status_label.setText(
-                "此格式不提供可靠的通用标签；信息会保存到同名 .mix.json 制作记录。"
+                "此格式不提供可靠的通用标签；信息会保存在工作区任务记录中。"
             )
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)

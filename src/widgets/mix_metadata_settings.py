@@ -52,7 +52,7 @@ class MixMetadataSettingsDialog(QDialog):
         self.version_check = QCheckBox(f"程序版本（当前 {APP_VERSION}）")
         self.version_check.setChecked(bool(fields.get("version", True)))
         layout.addWidget(self.version_check)
-        layout.addWidget(QLabel("WAV 和原始 AAC 的字段只写入同名 .mix.json 制作记录。"))
+        layout.addWidget(QLabel("WAV 和原始 AAC 的字段保存在工作区任务记录中。"))
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel

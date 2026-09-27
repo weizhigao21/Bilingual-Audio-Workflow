@@ -175,7 +175,7 @@ class MixerConfigPanel(QGroupBox):
 
         metadata_row = QHBoxLayout()
         self.metadata_check = QCheckBox("导出时写入作品信息")
-        self.metadata_check.setToolTip("控制标题、艺术家、专辑、备注及版本标签；制作记录仍会保存混音版本。")
+        self.metadata_check.setToolTip("控制标题、艺术家、专辑、备注及版本标签；工作区任务记录仍会保存混音版本。")
         self.metadata_check.toggled.connect(self._save)
         metadata_row.addWidget(self.metadata_check)
         metadata_btn = QPushButton("编辑信息...")

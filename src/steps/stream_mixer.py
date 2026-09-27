@@ -10,7 +10,7 @@ from .audio_utils import detect_angles_parallel, get_mix_audio_files, mix_with_n
 from .audio_utils.ffmpeg_utils import (
     decode_audio_to_pcm, export_pcm_file, export_pcm_wav,
 )
-from .audio_metadata import mix_metadata_options, write_provenance
+from .audio_metadata import mix_metadata_options, remember_mix_metadata
 
 
 def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
@@ -112,9 +112,9 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
             export_path = None
             task.force_remix = False
             try:
-                write_provenance(final_output, task, cfg, tags)
+                remember_mix_metadata(task, tags)
             except OSError as exc:
-                log(f"[音频混音] 警告：制作记录写入失败: {exc}")
+                log(f"[音频混音] 警告：任务记录写入失败: {exc}")
             progress(100)
             log(f"[音频混音] 完成: {final_output}")
             return True, final_output

@@ -71,18 +71,17 @@ class AudioMetadataTests(unittest.TestCase):
         self.assertTrue(ok, result)
         return Path(result)
 
-    def test_automatic_version_tags_and_provenance_in_both_mixers(self):
+    def test_automatic_version_tags_use_existing_task_record(self):
         for streaming, fmt in ((False, "mp3"), (True, "m4a")):
             with self.subTest(streaming=streaming, format=fmt):
                 output = self._mix(fmt, streaming)
                 tags = file_tags(output)
                 self.assertEqual(tags["title"], "source")
                 self.assertIn(APP_VERSION, tags["comment"])
-                record = json.loads(Path(sidecar_path(output)).read_text(encoding="utf-8"))
-                self.assertEqual(record["app_version"], APP_VERSION)
-                self.assertEqual(record["metadata"]["title"], "source")
-                self.assertEqual(record["source_file"], "source.wav")
-                self.assertNotIn(str(self.root), json.dumps(record))
+                self.assertFalse(Path(sidecar_path(output)).exists())
+                record = json.loads(Path(self.task.task_json_path).read_text(encoding="utf-8"))
+                self.assertEqual(record["mix_version"], APP_VERSION)
+                self.assertEqual(record["mix_metadata"]["title"], "source")
 
     def test_edit_embedded_tags_without_reencoding(self):
         output = self._mix()
@@ -97,9 +96,10 @@ class AudioMetadataTests(unittest.TestCase):
         self.assertIn("试听版", embedded["comment"])
         self.assertIn(APP_VERSION, embedded["comment"])
         self.assertEqual(read_editable_tags(str(output)), tags)
-        record = json.loads(Path(sidecar_path(output)).read_text(encoding="utf-8"))
-        self.assertEqual(record["metadata"], tags)
-        self.assertIn("metadata_updated_at_utc", record)
+        self.assertFalse(Path(sidecar_path(output)).exists())
+        record = json.loads(Path(self.task.task_json_path).read_text(encoding="utf-8"))
+        self.assertEqual(record["mix_metadata"], tags)
+        self.assertEqual(record["mix_metadata_editor_version"], APP_VERSION)
         # 重新混音沿用用户编辑过的标题等字段。
         self._mix()
         self.assertEqual(file_tags(output)["title"], tags["title"])
@@ -112,9 +112,9 @@ class AudioMetadataTests(unittest.TestCase):
                 tags = file_tags(output)
                 self.assertNotIn("title", tags)
                 self.assertNotIn(APP_VERSION, tags.get("comment", ""))
-                record = json.loads(Path(sidecar_path(output)).read_text(encoding="utf-8"))
-                self.assertEqual(record["app_version"], APP_VERSION)
-                self.assertEqual(record["metadata"], {
+                self.assertFalse(Path(sidecar_path(output)).exists())
+                self.assertEqual(self.task.mix_version, APP_VERSION)
+                self.assertEqual(self.task.mix_metadata, {
                     "title": "", "artist": "", "album": "", "comment": "",
                 })
 
@@ -136,7 +136,7 @@ class AudioMetadataTests(unittest.TestCase):
                 self.assertNotIn("album", tags)
                 self.assertNotIn(APP_VERSION, tags.get("comment", ""))
 
-    def test_wav_and_aac_keep_information_in_sidecar(self):
+    def test_wav_and_aac_keep_information_in_task_record(self):
         tags = {"title": "母版", "artist": "", "album": "", "comment": "请保留"}
         for fmt in ("wav", "aac"):
             with self.subTest(format=fmt):
@@ -144,28 +144,41 @@ class AudioMetadataTests(unittest.TestCase):
                 before = output.read_bytes()
                 edit_output_metadata(str(output), tags, self.task)
                 self.assertEqual(output.read_bytes(), before)
-                self.assertEqual(read_editable_tags(str(output)), tags)
+                self.assertEqual(read_editable_tags(str(output), task=self.task), tags)
+                self.assertFalse(Path(sidecar_path(output)).exists())
+                restored = TaskInfo(**json.loads(Path(self.task.task_json_path).read_text(encoding="utf-8")))
+                self.assertEqual(read_editable_tags(str(output), task=restored), tags)
+
+    def test_legacy_sidecar_remains_readable_without_creating_new_one(self):
+        output = self._mix("wav")
+        legacy_tags = {"title": "旧标题", "artist": "旧作者", "album": "", "comment": "旧备注"}
+        Path(sidecar_path(output)).write_text(
+            json.dumps({"app_version": "v2.1.9", "metadata": legacy_tags}),
+            encoding="utf-8",
+        )
+        self.task.mix_metadata = {}
+        self.assertEqual(read_editable_tags(str(output), task=self.task), legacy_tags)
 
     def test_remux_failure_keeps_original_and_cleans_temp(self):
         output = self._mix()
         before = output.read_bytes()
-        sidecar_before = Path(sidecar_path(output)).read_bytes()
+        record_before = Path(self.task.task_json_path).read_bytes()
         with patch("src.steps.audio_metadata._run_ffmpeg", side_effect=RuntimeError("mux failure")):
             with self.assertRaisesRegex(RuntimeError, "mux failure"):
                 edit_output_metadata(str(output), {"title": "new"}, self.task)
         self.assertEqual(output.read_bytes(), before)
-        self.assertEqual(Path(sidecar_path(output)).read_bytes(), sidecar_before)
+        self.assertEqual(Path(self.task.task_json_path).read_bytes(), record_before)
         self.assertEqual(list(self.root.glob(".mix-tags-*")), [])
 
-    def test_sidecar_failure_reports_warning_but_keeps_embedded_edit(self):
+    def test_task_record_failure_keeps_embedded_edit(self):
         output = self._mix()
         original_hash = packet_hash(output)
-        with patch("src.steps.audio_metadata.write_provenance",
+        with patch("src.steps.audio_metadata.remember_mix_metadata",
                    side_effect=OSError("disk full")):
             warning = edit_output_metadata(
                 str(output), {"title": "已更新", "comment": "新备注"}, self.task
             )
-        self.assertIn("制作记录写入失败", warning)
+        self.assertIn("任务记录写入失败", warning)
         self.assertEqual(packet_hash(output), original_hash)
         self.assertEqual(read_editable_tags(str(output))["title"], "已更新")
 
@@ -185,9 +198,9 @@ class AudioMetadataTests(unittest.TestCase):
         embedded = file_tags(output)
         self.assertIn("信息编辑", embedded["comment"])
         self.assertNotIn("混音：", embedded["comment"])
-        record = json.loads(Path(sidecar_path(output)).read_text(encoding="utf-8"))
-        self.assertNotIn("app_version", record)
-        self.assertEqual(record["metadata_editor_version"], APP_VERSION)
+        self.assertFalse(Path(sidecar_path(output)).exists())
+        self.assertEqual(self.task.mix_version, "")
+        self.assertEqual(self.task.mix_metadata_editor_version, APP_VERSION)
 
 
 if __name__ == "__main__":
