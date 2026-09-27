@@ -65,7 +65,6 @@ class TaskMixin:
         self.current_task_label.setText(
             f"文件夹：{group.group_name}　({done}/{total} 完成 · {total} 个音频)"
         )
-        self.metadata_btn.setEnabled(False)
         for step in (1, 2, 3):
             panel = self.step_panels[step]
             status = self._group_step_status(group, step)
@@ -97,7 +96,6 @@ class TaskMixin:
             self._current_group = None
             self._selected_folder = None
             self.current_task_label.setText("未选择任务")
-            self.metadata_btn.setEnabled(False)
             for panel in self.step_panels.values():
                 panel.reset()
             return
@@ -152,17 +150,8 @@ class TaskMixin:
             # 但允许通过"重跑"来取消跳过
             panel.start_btn.setEnabled(not running and ready and not skipped)
             panel.stop_btn.setEnabled(running)
-            if step == 3:
-                self.metadata_btn.setEnabled(
-                    status in (STEP_DONE, STEP_SKIPPED) and os.path.isfile(output)
-                )
 
     # ========== 任务管理 ==========
-    def _on_edit_current_metadata(self):
-        task = self.task_queue.current
-        if task:
-            self._on_edit_metadata(task.task_id)
-
     def _on_edit_metadata(self, task_id: str):
         task = self.task_queue.get_task(task_id)
         if not task or not os.path.isfile(task.step3_output):

@@ -31,7 +31,7 @@ from .audio_utils import (
 )
 from .audio_utils.ffmpeg_utils import probe_audio
 from .stream_mixer import mix_streaming_task
-from .audio_metadata import metadata_args, read_editable_tags, write_provenance
+from .audio_metadata import mix_metadata_options, write_provenance
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"}
@@ -146,8 +146,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         _progress(100)
         return True, final_output
 
-    tags = read_editable_tags(final_output, fallback_title=task.source_name)
-    metadata_options = metadata_args(tags)
+    tags, metadata_options = mix_metadata_options(cfg, task, final_output)
 
     # 长音频避免 AudioSegment.from_file 一次解码整段并物化多个全长数组。
     threshold = max(0, int(cfg.get("streaming_threshold_minutes", 20)))

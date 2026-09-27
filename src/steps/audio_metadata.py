@@ -22,6 +22,7 @@ MIX_SETTING_KEYS = (
     "align_onset", "content_alignment", "peak_mode",
     "high_quality_resample", "audio_bitrate", "audio_sample_rate",
     "audio_channels", "wav_bit_depth", "output_format",
+    "metadata_enabled", "metadata_fields", "metadata_values",
 )
 
 
@@ -45,18 +46,50 @@ def _strip_software_marker(comment):
     return "\n".join(lines).strip()
 
 
-def metadata_args(tags, marker=MIX_MARKER):
-    """构造 FFmpeg 输出标签；版本标记始终留在备注末尾。"""
+def metadata_args(tags, marker=MIX_MARKER, fields=None, include_version=True):
+    """构造 FFmpeg 输出标签；可按混音配置选择字段。"""
     tags = normalize_tags(tags)
-    comment = tags["comment"]
-    if comment:
-        comment += "\n"
-    comment += marker
-    args = ["-metadata", f"comment={comment}",
-            "-metadata", f"encoded_by={marker}"]
+    if fields is None:
+        fields = {key: True for key in TAG_KEYS}
+    args = []
+    if fields.get("comment") or include_version:
+        comment = tags["comment"] if fields.get("comment") else ""
+        if include_version:
+            comment = f"{comment}\n{marker}" if comment else marker
+        args += ["-metadata", f"comment={comment}"]
+    if include_version:
+        args += ["-metadata", f"encoded_by={marker}"]
     for key in ("title", "artist", "album"):
-        args += ["-metadata", f"{key}={tags[key]}"]
+        if fields.get(key):
+            args += ["-metadata", f"{key}={tags[key]}"]
     return args
+
+
+def mix_metadata_options(cfg, task, output_path):
+    """按用户设置生成作品信息；关闭时仍由制作记录保存混音版本。"""
+    if not cfg.get("metadata_enabled", True):
+        return {}, []
+    fields = cfg.get("metadata_fields") or {}
+    defaults = {"title": True, "artist": True, "album": True,
+                "comment": True, "version": True}
+    fields = {key: bool(fields.get(key, value)) for key, value in defaults.items()}
+    values = cfg.get("metadata_values") or {}
+    previous = read_editable_tags(output_path, fallback_title=task.source_name)
+    tags = {}
+    for key in TAG_KEYS:
+        if not fields[key]:
+            continue
+        template = str(values.get(key, "{文件名}" if key == "title" else "") or "")
+        if key == "title" and template == "{文件名}":
+            # 保留混音后手工编辑过的单文件标题。
+            tags[key] = previous[key]
+        elif not template:
+            tags[key] = previous[key]
+        else:
+            tags[key] = template.replace("{文件名}", task.source_name)
+    return tags, ["-map_metadata", "-1"] + metadata_args(
+        tags, fields=fields, include_version=fields["version"]
+    )
 
 
 def _read_sidecar(output_path):

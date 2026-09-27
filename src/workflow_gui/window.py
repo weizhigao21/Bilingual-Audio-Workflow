@@ -154,10 +154,6 @@ class WorkflowMainWindow(
                 mixer_config_btn = panel.add_extra_button("混音配置...")
                 mixer_config_btn.setToolTip("设置导出格式、音量、声道检测等参数")
                 mixer_config_btn.clicked.connect(self._on_open_mixer_config)
-                self.metadata_btn = panel.add_extra_button("编辑成品信息...")
-                self.metadata_btn.setToolTip("修改混音成品的标题、艺术家、专辑和备注")
-                self.metadata_btn.setEnabled(False)
-                self.metadata_btn.clicked.connect(self._on_edit_current_metadata)
             # 步骤1面板内加"字幕配置"按钮
             if step == 1:
                 whisper_config_btn = panel.add_extra_button("字幕配置...")

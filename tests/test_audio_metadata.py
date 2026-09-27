@@ -104,6 +104,38 @@ class AudioMetadataTests(unittest.TestCase):
         self._mix()
         self.assertEqual(file_tags(output)["title"], tags["title"])
 
+    def test_export_metadata_can_be_disabled_in_both_mixers(self):
+        self.cfg.mixer_cfg["metadata_enabled"] = False
+        for streaming, fmt in ((False, "mp3"), (True, "m4a")):
+            with self.subTest(streaming=streaming):
+                output = self._mix(fmt, streaming)
+                tags = file_tags(output)
+                self.assertNotIn("title", tags)
+                self.assertNotIn(APP_VERSION, tags.get("comment", ""))
+                record = json.loads(Path(sidecar_path(output)).read_text(encoding="utf-8"))
+                self.assertEqual(record["app_version"], APP_VERSION)
+                self.assertEqual(record["metadata"], {
+                    "title": "", "artist": "", "album": "", "comment": "",
+                })
+
+    def test_selected_export_fields_and_values(self):
+        self.cfg.mixer_cfg["metadata_fields"] = {
+            "title": True, "artist": True, "album": False,
+            "comment": False, "version": False,
+        }
+        self.cfg.mixer_cfg["metadata_values"] = {
+            "title": "双语 {文件名}", "artist": "示例作者",
+            "album": "不应写入", "comment": "不应写入",
+        }
+        for streaming, fmt in ((False, "mp3"), (True, "m4a")):
+            with self.subTest(streaming=streaming):
+                output = self._mix(fmt, streaming)
+                tags = file_tags(output)
+                self.assertEqual(tags["title"], "双语 source")
+                self.assertEqual(tags["artist"], "示例作者")
+                self.assertNotIn("album", tags)
+                self.assertNotIn(APP_VERSION, tags.get("comment", ""))
+
     def test_wav_and_aac_keep_information_in_sidecar(self):
         tags = {"title": "母版", "artist": "", "album": "", "comment": "请保留"}
         for fmt in ("wav", "aac"):

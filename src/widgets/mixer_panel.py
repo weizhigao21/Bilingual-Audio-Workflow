@@ -173,6 +173,20 @@ class MixerConfigPanel(QGroupBox):
         self.skip_check.toggled.connect(self._save)
         layout.addRow("", self.skip_check)
 
+        metadata_row = QHBoxLayout()
+        self.metadata_check = QCheckBox("导出时写入作品信息")
+        self.metadata_check.setToolTip("控制标题、艺术家、专辑、备注及版本标签；制作记录仍会保存混音版本。")
+        self.metadata_check.toggled.connect(self._save)
+        metadata_row.addWidget(self.metadata_check)
+        metadata_btn = QPushButton("编辑信息...")
+        metadata_btn.setToolTip("选择导出时写入的字段并设置内容")
+        metadata_btn.clicked.connect(self._edit_metadata_settings)
+        metadata_row.addWidget(metadata_btn)
+        metadata_row.addStretch()
+        metadata_widget = QWidget()
+        metadata_widget.setLayout(metadata_row)
+        layout.addRow("作品信息:", metadata_widget)
+
         # 线程数
         self.thread_spin = QSpinBox()
         self.thread_spin.setRange(1, 32)
@@ -240,7 +254,7 @@ class MixerConfigPanel(QGroupBox):
                    self.suffix_check, self.folder_prefix_check,
                    self.output_prefix_check,
                    self.skip_check, self.thread_spin, self.streaming_spin,
-                   self.batch_parallel_check]
+                   self.batch_parallel_check, self.metadata_check]
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -298,6 +312,7 @@ class MixerConfigPanel(QGroupBox):
             self.folder_prefix_check.setChecked(cfg.get("folder_prefix", True))
             self.output_prefix_check.setChecked(cfg.get("output_folder_prefix", False))
             self.skip_check.setChecked(cfg.get("skip_existing", True))
+            self.metadata_check.setChecked(cfg.get("metadata_enabled", True))
             self.thread_spin.setValue(cfg.get("thread_count", 4))
             self.streaming_spin.setValue(cfg.get("streaming_threshold_minutes", 20))
             self.batch_parallel_check.setChecked(cfg.get("enable_batch_parallel", True))
@@ -330,11 +345,18 @@ class MixerConfigPanel(QGroupBox):
         cfg["folder_prefix"] = self.folder_prefix_check.isChecked()
         cfg["output_folder_prefix"] = self.output_prefix_check.isChecked()
         cfg["skip_existing"] = self.skip_check.isChecked()
+        cfg["metadata_enabled"] = self.metadata_check.isChecked()
         cfg["thread_count"] = self.thread_spin.value()
         cfg["streaming_threshold_minutes"] = self.streaming_spin.value()
         cfg["enable_batch_parallel"] = self.batch_parallel_check.isChecked()
         self.config.save()
         self.config_changed.emit()
+
+    def _edit_metadata_settings(self):
+        from .mix_metadata_settings import MixMetadataSettingsDialog
+        dialog = MixMetadataSettingsDialog(self.config, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.config_changed.emit()
 
     def _on_browse_output(self):
         from PyQt6.QtWidgets import QFileDialog

@@ -96,6 +96,14 @@ DEFAULT_CONFIG = {
         "enable_batch_parallel": True,
         "folder_prefix": True,
         "channel_map": {"left": 155, "right": 25, "both": 135},
+        "metadata_enabled": True,
+        "metadata_fields": {
+            "title": True, "artist": True, "album": True,
+            "comment": True, "version": True,
+        },
+        "metadata_values": {
+            "title": "{文件名}", "artist": "", "album": "", "comment": "",
+        },
     },
 }
 
