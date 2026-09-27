@@ -1,4 +1,4 @@
-# 双语音声工作流 v2.1.11
+# 双语音声工作流 v2.1.12
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
@@ -186,6 +186,10 @@ TTS 合成结果按 **文本、声音/模型、生成设置及 API 来源** 区�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v2.1.12 (2026-09-27)
+- 修复 infer.exe 已写出字幕但退出阶段异常时整批误报失败：逐个核对字幕文件，已生成的继续进入后续步骤，仅缺失的报错
+- 未勾选“覆盖已有字幕文件”时，重跑会直接复用同名字幕，不再重复启动模型；覆盖模式则要求新字幕确实写入
 
 ### v2.1.11 (2026-09-27)
 - 混音不再为每个成品生成 `.mix.json`；复用工作区 `task.json` 保存版本和 WAV/AAC 的编辑信息，MP3 等格式仍将所选字段写入成品标签

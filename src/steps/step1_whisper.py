@@ -27,6 +27,27 @@ def _decode_console_line(b):
     return b.decode("utf-8", errors="replace")
 
 
+def _subtitle_signature(path):
+    try:
+        stat = os.stat(path)
+        return (stat.st_mtime_ns, stat.st_size) if stat.st_size else None
+    except OSError:
+        return None
+
+
+def _subtitle_paths(source_path, formats):
+    base = os.path.splitext(source_path)[0]
+    return [f"{base}.{fmt}" for fmt in formats]
+
+
+def _find_subtitle(source_path, formats, previous=None):
+    for path in _subtitle_paths(source_path, formats):
+        signature = _subtitle_signature(path)
+        if signature and (previous is None or signature != previous.get(path)):
+            return path
+    return ""
+
+
 class WhisperWorker(QThread):
     """字幕提取工作线程。"""
     log_signal = pyqtSignal(str)
@@ -63,13 +84,25 @@ class WhisperWorker(QThread):
 
     def _run_impl(self):
         whisper_dir = self.config.whisper_dir
+        cfg = self.config.whisper_cfg
+        source_path = self.task.source_path
+        sub_formats = [fmt.strip() for fmt in cfg.get("sub_formats", "lrc").split(",")
+                       if fmt.strip()]
+        if not cfg.get("overwrite", False):
+            existing = _find_subtitle(source_path, sub_formats)
+            if existing:
+                self.progress_signal.emit(100)
+                self.log_signal.emit(f"[字幕提取] 已有字幕，无需启动 infer.exe: {existing}")
+                self._emit_finished(True, existing)
+                return
         infer_exe = os.path.join(whisper_dir, "infer.exe")
         if not os.path.exists(infer_exe):
             self._emit_finished(False, f"找不到 infer.exe: {infer_exe}")
             return
 
-        cfg = self.config.whisper_cfg
-        source_path = self.task.source_path
+        previous = ({path: _subtitle_signature(path)
+                     for path in _subtitle_paths(source_path, sub_formats)}
+                    if cfg.get("overwrite", False) else None)
         # 字幕最终会出现在源文件所在目录
         search_dir = os.path.dirname(source_path)
         # 每个任务独立识别自己的源文件（文件夹组的子任务同样按文件处理）
@@ -171,26 +204,19 @@ class WhisperWorker(QThread):
             self._emit_finished(False, "用户中止")
             return
 
-        if ret != 0:
-            self._emit_finished(False, f"infer.exe 退出码: {ret}")
-            return
-
         # 查找生成的字幕文件
-        sub_formats = cfg.get("sub_formats", "lrc").split(",")
-        found_sub = ""
-        for fmt in sub_formats:
-            fmt = fmt.strip()
-            if not fmt:
-                continue
-            expected = os.path.join(search_dir, f"{self.task.source_name}.{fmt}")
-            if os.path.exists(expected):
-                found_sub = expected
-                break
+        found_sub = _find_subtitle(source_path, sub_formats, previous)
 
         if not found_sub:
-            self._emit_finished(False, "字幕提取完成但未找到输出文件")
+            error = (f"infer.exe 退出码: {ret}，未找到有效字幕文件" if ret != 0
+                     else "字幕提取完成但未找到输出文件")
+            self._emit_finished(False, error)
             return
 
+        if ret != 0:
+            self.log_signal.emit(
+                f"[字幕提取] infer.exe 异常退出 ({ret})，但已生成字幕，按文件结果继续"
+            )
         self.progress_signal.emit(100)
         self.log_signal.emit(f"[字幕提取] 完成: {found_sub}")
         self._emit_finished(True, found_sub)
@@ -246,9 +272,10 @@ class WhisperBatchWorker(QThread):
                         return False
         return found == selected
 
-    def _inputs(self, suffixes):
+    def _inputs(self, suffixes, tasks=None):
+        tasks = self.tasks if tasks is None else tasks
         roots = {}
-        for task in self.tasks:
+        for task in tasks:
             root = task.import_folder if task.from_folder and task.import_folder else None
             if root:
                 roots.setdefault(self._normalized(root), []).append(task)
@@ -258,7 +285,7 @@ class WhisperBatchWorker(QThread):
             if self._folder_covers_tasks(root, tasks, suffixes):
                 inputs.append(root)
                 covered.update(task.task_id for task in tasks)
-        inputs.extend(task.source_path for task in self.tasks
+        inputs.extend(task.source_path for task in tasks
                       if task.task_id not in covered)
         return list(dict.fromkeys(inputs))
 
@@ -280,15 +307,37 @@ class WhisperBatchWorker(QThread):
             yield group
 
     def _run_impl(self):
+        cfg = self.config.whisper_cfg
+        formats = [fmt.strip() for fmt in cfg.get("sub_formats", "lrc").split(",")
+                   if fmt.strip()]
+        pending_tasks = []
+        for task in self.tasks:
+            existing = ("" if cfg.get("overwrite", False) else
+                        _find_subtitle(task.source_path, formats))
+            if existing:
+                self._report(task.task_id, True, existing)
+            else:
+                pending_tasks.append(task)
+        if not pending_tasks:
+            self.progress_signal.emit(100)
+            self.log_signal.emit(f"[字幕批量] {len(self.tasks)} 个任务已有字幕，无需启动 infer.exe")
+            self.finished_signal.emit(len(self.tasks), 0)
+            return
+
         whisper_dir = self.config.whisper_dir
         infer_exe = os.path.join(whisper_dir, "infer.exe")
         if not os.path.isfile(infer_exe):
-            for task in self.tasks:
+            for task in pending_tasks:
                 self._report(task.task_id, False, f"找不到 infer.exe: {infer_exe}")
-            self.finished_signal.emit(0, len(self._reported))
+            success = sum(self._reported.values())
+            self.finished_signal.emit(success, len(self._reported) - success)
             return
 
-        cfg = self.config.whisper_cfg
+        previous = ({task.task_id: {
+            path: _subtitle_signature(path)
+            for path in _subtitle_paths(task.source_path, formats)
+        } for task in self.tasks} if cfg.get("overwrite", False) else {})
+        failed_exit_codes = {}
         suffixes = cfg.get("audio_suffixes", WHISPER_MEDIA_SUFFIXES)
         cmd = [
             infer_exe,
@@ -314,7 +363,7 @@ class WhisperBatchWorker(QThread):
         else:
             cmd.append("--no_merge_segments")
 
-        inputs = self._inputs(suffixes)
+        inputs = self._inputs(suffixes, pending_tasks)
         batches = list(self._chunks(inputs, cmd))
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         progress = re.compile(r"(\d+(?:\.\d+)?)%")
@@ -356,25 +405,33 @@ class WhisperBatchWorker(QThread):
                         if source == candidate or (os.path.isdir(path) and
                                 os.path.splitdrive(source)[0] == os.path.splitdrive(candidate)[0] and
                                 os.path.commonpath((source, candidate)) == candidate):
-                            self._report(task.task_id, False, f"infer.exe 退出码: {returncode}")
+                            failed_exit_codes[task.task_id] = returncode
                             break
 
-        formats = [fmt.strip() for fmt in cfg.get("sub_formats", "lrc").split(",")
-                   if fmt.strip()]
+        recovered = 0
         for task in self.tasks:
             if task.task_id in self._reported:
                 continue
             if self._stop_flag:
                 self._report(task.task_id, False, "用户中止")
                 continue
-            base = os.path.splitext(task.source_path)[0]
-            output = next((f"{base}.{fmt}" for fmt in formats
-                           if os.path.isfile(f"{base}.{fmt}")), "")
-            self._report(task.task_id, bool(output),
-                         output or "未找到对应音频的字幕文件")
+            output = _find_subtitle(task.source_path, formats,
+                                    previous.get(task.task_id))
+            if output:
+                recovered += task.task_id in failed_exit_codes
+                self._report(task.task_id, True, output)
+            else:
+                code = failed_exit_codes.get(task.task_id)
+                error = (f"infer.exe 退出码: {code}，未找到有效字幕文件" if code is not None
+                         else "未找到对应音频的字幕文件")
+                self._report(task.task_id, False, error)
 
         success = sum(self._reported.values())
         failed = len(self._reported) - success
+        if recovered:
+            self.log_signal.emit(
+                f"[字幕批量] infer.exe 异常退出，但 {recovered} 个任务已生成字幕，按文件结果继续"
+            )
         if not self._stop_flag:
             self.progress_signal.emit(100)
         self.log_signal.emit(f"[字幕批量] 完成: 成功 {success}, 失败 {failed}")
