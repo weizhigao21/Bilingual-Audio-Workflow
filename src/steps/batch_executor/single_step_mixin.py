@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """批量执行器 Mixin：单任务单步执行（事件循环等待 / 同步等待两种方式）。"""
-from PyQt6.QtCore import QEventLoop
+from PyQt6.QtCore import QEventLoop, Qt
 
 from ...task_manager import TaskInfo, STEP_RUNNING, STEP_DONE, STEP_FAILED
 
@@ -77,16 +77,15 @@ class SingleStepMixin:
         return ok, msg
 
     def _run_single_step_sync(self, task: TaskInfo, step: int,
-                              base_pct: int = 0, span_pct: int = 100):
+                              base_pct: int = 0, span_pct: int = 100,
+                              progress_callback=None):
         """同步执行单个任务的单个步骤（供流水线线程调用）。
 
         与 _run_single_step 不同：不使用 QEventLoop 等待信号，
         而是 start() 后 wait() 阻塞，直接读取 worker.result 属性。
 
-        任务内进度（各步骤均为 0-100 百分比）映射到
-        [base_pct, base_pct+span_pct] 区间转发，使进度条在任务执行期间
-        持续前进（修复"混音等待音频时一直显示 0%"）；任务完成后由
-        _run_pipeline 按"每完成一个任务 +1/N"的累计值推进到区间的精确位置。
+        在无 Qt 事件循环的流水线线程内，用直连信号即时转发日志、状态和
+        任务内进度；流水线可通过 progress_callback 汇总多个并发任务。
         """
         worker = self._create_worker(task, step)
         if not worker:
@@ -95,20 +94,29 @@ class SingleStepMixin:
         task.set_step_status(step, STEP_RUNNING)
         # 与 _run_single_step 一致：worker 日志统一加任务名前缀
         worker.log_signal.connect(
-            lambda m, n=task.source_name: self.log_signal.emit(f"[{n}] {m}")
+            lambda m, n=task.source_name: self.log_signal.emit(f"[{n}] {m}"),
+            Qt.ConnectionType.DirectConnection,
         )
 
         def on_progress(v):
+            if progress_callback is not None:
+                progress_callback(v)
+                return
             # 所有步骤的进度统一为 0-100 百分比（TTS 已在 TTSBridgeWorker 归一化），
             # 映射到 [base_pct, base_pct+span_pct] 区间，任务内平滑推进
             mapped = base_pct + int((v / 100.0) * span_pct)
             self.step_progress_signal.emit(step, max(0, min(100, mapped)))
 
-        worker.progress_signal.connect(on_progress)
-        # TTS 步骤有状态文本（片段 x/N · 剩余时间），转发到步骤面板进度条
+        worker.progress_signal.connect(on_progress, Qt.ConnectionType.DirectConnection)
+        # 并发语音任务的状态带上文件名，便于区分哪个音频正在推进。
         if hasattr(worker, 'status_signal'):
+            def on_status(text):
+                label = f"{task.source_name[:18]} · {text}" if step == 2 else text
+                self.step_status_signal.emit(step, label)
+
             worker.status_signal.connect(
-                lambda text, s=step: self.step_status_signal.emit(s, text)
+                on_status,
+                Qt.ConnectionType.DirectConnection,
             )
 
         self._track_worker(worker, True)

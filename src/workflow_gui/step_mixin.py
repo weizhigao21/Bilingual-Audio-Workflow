@@ -52,13 +52,14 @@ class StepMixin:
             worker = TTSBridgeWorker(task, self.config)
             self._tts_total = 0
             worker.total_signal.connect(self._on_tts_total)
-            worker.status_signal.connect(
-                lambda text, s=step: self._on_step_status(s, text)
-            )
         else:
             worker = MixerWorker(task, self.config)
 
         worker.log_signal.connect(self._append_log)
+        if hasattr(worker, "status_signal"):
+            worker.status_signal.connect(
+                lambda text, s=step: self._on_step_status(s, text)
+            )
         worker.progress_signal.connect(
             lambda v, s=step: self._on_step_progress(s, v)
         )

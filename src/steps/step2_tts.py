@@ -3,7 +3,7 @@
 import os
 import hashlib
 
-from PyQt6.QtCore import QThread, pyqtSignal, QEventLoop, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 from ..config import WorkflowConfig
 from ..task_manager import TaskInfo
@@ -113,11 +113,15 @@ class TTSBridgeWorker(QThread):
 
         # 创建 TTSWorker 并桥接信号
         self._tts_worker = TTSWorker(tts_config)
-        self._tts_worker.log_signal.connect(self.log_signal.emit)
+        self._tts_worker.log_signal.connect(
+            self.log_signal.emit, Qt.ConnectionType.DirectConnection
+        )
         # progress 先归一化为 0-100 百分比再转发：
         # TTSWorker 发的是"已完成片段数"(0..total)，与步骤1/3 的百分比语义不一致，
         # 导致批量/流水线模式下无法正确映射、单任务时被 clamp 成假 100%。
-        self._tts_worker.progress_signal.connect(self._on_progress)
+        self._tts_worker.progress_signal.connect(
+            self._on_progress, Qt.ConnectionType.DirectConnection
+        )
         # 完成/总数回调必须用 DirectConnection：
         # 在流水线模式下 TTSBridgeWorker 可能创建于无事件循环的 python 线程，
         # QueuedConnection 的信号永远不会被处理，导致 result 不被写入
@@ -131,18 +135,17 @@ class TTSBridgeWorker(QThread):
         self._tts_worker.total_weight_signal.connect(
             self._on_total_weight, Qt.ConnectionType.DirectConnection
         )
-        self._tts_worker.eta_signal.connect(self._on_eta)
+        self._tts_worker.eta_signal.connect(
+            self._on_eta, Qt.ConnectionType.DirectConnection
+        )
         self._tts_worker.finished_signal.connect(
             self._on_finished, Qt.ConnectionType.DirectConnection
         )
 
-        # 启动 TTSWorker（QThread），用 QEventLoop 等待其完成
-        # 不用 wait() 是因为它会阻塞线程不处理事件，导致 progress_signal 信号丢失
-        loop = QEventLoop()
-        self._tts_worker.finished_signal.connect(loop.quit)
+        # 所有内部回调都用 DirectConnection，完成信号即使很快发出也不会
+        # 早于事件循环启动而丢失；直接等待线程真正退出即可。
         self._tts_worker.start()
-        loop.exec()
-        # TTSWorker 已完成，_on_finished 在 loop 中通过信号已自动调用
+        self._tts_worker.wait()
 
     def _on_total(self, total: int):
         try:

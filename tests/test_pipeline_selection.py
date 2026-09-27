@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,8 +29,10 @@ class FakePipeline(PipelineMixin):
     def _resolve_source_path(self, task):
         return True
 
-    def _run_single_step_sync(self, task, step, *args):
+    def _run_single_step_sync(self, task, step, *args, progress_callback=None):
         self.ran.append(step)
+        if progress_callback is not None:
+            progress_callback(50)
         task.set_step_status(step, STEP_DONE)
         return True, 'ok'
 
@@ -68,6 +71,41 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(pipeline.ran,[3])
             self.assertEqual(task.step2_status,STEP_SKIPPED)
             self.assertNotIn((2,100),pipeline.step_progress_signal.calls)
+
+    def test_parallel_tts_progress_never_moves_backwards(self):
+        class ParallelPipeline(FakePipeline):
+            def __init__(self, tasks):
+                super().__init__(tasks[0], [2])
+                self.tasks = tasks
+                self.first_reported = threading.Event()
+                self.second_reported = threading.Event()
+
+            def _run_single_step_sync(self, task, step, *args, progress_callback=None):
+                if task.task_id == 'first':
+                    progress_callback(80)
+                    self.first_reported.set()
+                    if not self.second_reported.wait(5):
+                        raise TimeoutError('第二个语音任务没有并行启动')
+                else:
+                    if not self.first_reported.wait(5):
+                        raise TimeoutError('第一个语音任务没有上报进度')
+                    progress_callback(10)
+                    self.second_reported.set()
+                progress_callback(100)
+                task.set_step_status(step, STEP_DONE)
+                return True, 'ok'
+
+        with tempfile.TemporaryDirectory() as folder:
+            tasks = [TaskInfo(task_id, str(Path(folder) / f'{task_id}.wav'),
+                              task_id, folder, step1_status=STEP_SKIPPED)
+                     for task_id in ('first', 'second')]
+            pipeline = ParallelPipeline(tasks)
+            self.assertEqual(pipeline._run_pipeline(2), (2, 0, 0))
+            values = [value for step, value in pipeline.step_progress_signal.calls if step == 2]
+            self.assertEqual(values, sorted(values))
+            self.assertIn(40, values)
+            self.assertIn(45, values)
+            self.assertEqual(values[-1], 100)
 
 
 if __name__ == '__main__':

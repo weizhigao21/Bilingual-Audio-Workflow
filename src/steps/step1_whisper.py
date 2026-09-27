@@ -5,13 +5,13 @@
 实时读取 stdout 输出进度和日志。
 """
 import os
-import re
 import subprocess
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..config import WorkflowConfig, WHISPER_MEDIA_SUFFIXES
 from ..task_manager import TaskInfo
+from .whisper_progress import WhisperProgress, show_in_gui
 
 
 def _decode_console_line(b):
@@ -52,6 +52,7 @@ class WhisperWorker(QThread):
     """字幕提取工作线程。"""
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)       # 0-100
+    status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str) # (success, output_path_or_error)
 
     def __init__(self, task: TaskInfo, config: WorkflowConfig):
@@ -165,36 +166,17 @@ class WhisperWorker(QThread):
             bufsize=-1,
         )
 
-        # 解析进度正则
-        progress_patterns = [
-            re.compile(r"(\d+(?:\.\d+)?)%"),           # "45%" 或 "45.5%"
-            re.compile(r"(\d+)/(\d+)"),                 # "45/100"
-        ]
-
+        progress = WhisperProgress(1)
         for raw in self._process.stdout:
             if self._stop_flag:
                 break
-            line = _decode_console_line(raw).rstrip()
-            if not line:
-                continue
-            self.log_signal.emit(line)
-
-            # 尝试解析进度
-            for pat in progress_patterns:
-                m = pat.search(line)
-                if m:
-                    try:
-                        if pat.groups == 2:
-                            cur, total = int(m.group(1)), int(m.group(2))
-                            if total > 0:
-                                pct = int(cur * 100 / total)
-                                self.progress_signal.emit(min(pct, 99))
-                        else:
-                            pct = int(float(m.group(1)))
-                            self.progress_signal.emit(min(pct, 99))
-                        break
-                    except (ValueError, ZeroDivisionError):
-                        pass
+            for line in _decode_console_line(raw).replace("\r", "\n").splitlines():
+                event = progress.feed(line)
+                if event:
+                    self.progress_signal.emit(event[0])
+                    self.status_signal.emit(event[1])
+                if line and show_in_gui(line):
+                    self.log_signal.emit(line)
 
         self._process.wait()
         ret = self._process.returncode
@@ -227,6 +209,7 @@ class WhisperBatchWorker(QThread):
 
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
+    status_signal = pyqtSignal(str)
     task_result_signal = pyqtSignal(str, bool, str)
     finished_signal = pyqtSignal(int, int)
 
@@ -306,6 +289,25 @@ class WhisperBatchWorker(QThread):
         if group:
             yield group
 
+    @classmethod
+    def _batch_task_ids(cls, batch, tasks):
+        """统计命令行批次覆盖的音频数，目录输入可能包含多份音频。"""
+        covered = set()
+        for path in batch:
+            candidate = cls._normalized(path)
+            is_folder = os.path.isdir(path)
+            for task in tasks:
+                source = cls._normalized(task.source_path)
+                if source == candidate:
+                    covered.add(task.task_id)
+                elif is_folder:
+                    try:
+                        if os.path.commonpath((source, candidate)) == candidate:
+                            covered.add(task.task_id)
+                    except ValueError:
+                        pass
+        return covered
+
     def _run_impl(self):
         cfg = self.config.whisper_cfg
         formats = [fmt.strip() for fmt in cfg.get("sub_formats", "lrc").split(",")
@@ -323,6 +325,9 @@ class WhisperBatchWorker(QThread):
             self.log_signal.emit(f"[字幕批量] {len(self.tasks)} 个任务已有字幕，无需启动 infer.exe")
             self.finished_signal.emit(len(self.tasks), 0)
             return
+        existing_count = len(self.tasks) - len(pending_tasks)
+        if existing_count:
+            self.progress_signal.emit(int(existing_count * 100 / len(self.tasks)))
 
         whisper_dir = self.config.whisper_dir
         infer_exe = os.path.join(whisper_dir, "infer.exe")
@@ -365,8 +370,9 @@ class WhisperBatchWorker(QThread):
 
         inputs = self._inputs(suffixes, pending_tasks)
         batches = list(self._chunks(inputs, cmd))
+        batch_counts = [len(self._batch_task_ids(batch, pending_tasks)) for batch in batches]
+        completed_before_batch = 0
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        progress = re.compile(r"(\d+(?:\.\d+)?)%")
         for index, batch in enumerate(batches):
             if self._stop_flag:
                 break
@@ -382,15 +388,22 @@ class WhisperBatchWorker(QThread):
                 creationflags=creationflags,
                 bufsize=-1,
             )
+            batch_count = batch_counts[index]
+            progress = WhisperProgress(batch_count)
             for raw in self._process.stdout:
                 if self._stop_flag:
                     break
-                line = _decode_console_line(raw).rstrip()
-                if line:
-                    self.log_signal.emit(line)
-                    match = progress.search(line)
-                    if match:
-                        self.progress_signal.emit(min(int(float(match.group(1))), 99))
+                for line in _decode_console_line(raw).replace("\r", "\n").splitlines():
+                    event = progress.feed(line)
+                    if event:
+                        completed = completed_before_batch + event[0] * batch_count / 100
+                        overall = int((existing_count + completed) * 100 / len(self.tasks))
+                        self.progress_signal.emit(min(99, overall))
+                        status = (event[1] if len(batches) == 1 else
+                                  f"批次 {index + 1}/{len(batches)} · {event[1]}")
+                        self.status_signal.emit(status)
+                    if line and show_in_gui(line):
+                        self.log_signal.emit(line)
             if self._stop_flag:
                 self._process.terminate()
             self._process.wait()
@@ -398,15 +411,9 @@ class WhisperBatchWorker(QThread):
             self._process = None
             if returncode != 0 and not self._stop_flag:
                 self.log_signal.emit(f"[字幕批量] infer.exe 退出码: {returncode}")
-                for task in self.tasks:
-                    source = self._normalized(task.source_path)
-                    for path in batch:
-                        candidate = self._normalized(path)
-                        if source == candidate or (os.path.isdir(path) and
-                                os.path.splitdrive(source)[0] == os.path.splitdrive(candidate)[0] and
-                                os.path.commonpath((source, candidate)) == candidate):
-                            failed_exit_codes[task.task_id] = returncode
-                            break
+                for task_id in self._batch_task_ids(batch, pending_tasks):
+                    failed_exit_codes[task_id] = returncode
+            completed_before_batch += batch_count
 
         recovered = 0
         for task in self.tasks:

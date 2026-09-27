@@ -61,13 +61,12 @@ class PipelineMixin:
             tts_queue = queue.Queue()
             mix_queue = queue.Queue()
 
-            # 任务级累计进度：每完成一个任务的语音/混音，进度 +1/N
-            # （不转发任务内进度，避免多任务并发时进度条左右横跳）
+            # 各任务内进度独立累计，再折算为整批进度，允许并发且不回退。
             progress_lock = threading.Lock()
-            tts_done = 0
-            mix_done = 0
             total_tts_tasks = 0
             total_mix_tasks = 0
+            tts_progress = {}
+            mix_progress = {}
 
             # 只放需要处理的步骤（跳过已完成/已失败的任务）
             for task in self.tasks:
@@ -90,10 +89,18 @@ class PipelineMixin:
             if 3 in self.steps:
                 total_mix_tasks += total_tts_tasks
 
+            def update_step_progress(step, task_id, value):
+                """并发任务各自累计，避免较慢任务把进度条拉回。"""
+                with progress_lock:
+                    values = tts_progress if step == 2 else mix_progress
+                    values[task_id] = max(values.get(task_id, 0), min(100, max(0, value)))
+                    total_tasks = total_tts_tasks if step == 2 else total_mix_tasks
+                    overall = int(sum(values.values()) / max(1, total_tasks))
+                    self.step_progress_signal.emit(step, overall)
+
             tts_done_event = threading.Event()
 
             def tts_worker_fn():
-                nonlocal tts_done
                 try:
                     while not self._stop_flag:
                         try:
@@ -107,10 +114,10 @@ class PipelineMixin:
                         self.log_signal.emit(
                             f"[流水线] [{task.source_name}] 开始语音生成"
                         )
-                        with progress_lock:
-                            base = int(tts_done * 100 / max(1, total_tts_tasks))
-                            span = int(100 / max(1, total_tts_tasks))
-                        ok, msg = self._run_single_step_sync(task, 2, base, span)
+                        ok, msg = self._run_single_step_sync(
+                            task, 2, progress_callback=lambda value, task_id=task.task_id:
+                            update_step_progress(2, task_id, value)
+                        )
                         # 语音完成立即通知刷新任务列表（显示语音进度）
                         self.task_finished.emit(task.task_id, ok)
                         if ok:
@@ -125,17 +132,12 @@ class PipelineMixin:
                             )
                             mark_failed(task.task_id)
                         # 语音进度按任务累计推进
-                        with progress_lock:
-                            tts_done += 1
-                            self.step_progress_signal.emit(
-                                2, int(tts_done * 100 / max(1, total_tts_tasks))
-                            )
+                        update_step_progress(2, task.task_id, 100)
                         tts_queue.task_done()
                 finally:
                     pass
 
             def mix_worker_fn():
-                nonlocal mix_done
                 try:
                     while not self._stop_flag:
                         try:
@@ -159,10 +161,10 @@ class PipelineMixin:
                         self.log_signal.emit(
                             f"[流水线] [{task.source_name}] 开始混音"
                         )
-                        with progress_lock:
-                            base = int(mix_done * 100 / max(1, total_mix_tasks))
-                            span = int(100 / max(1, total_mix_tasks))
-                        ok, msg = self._run_single_step_sync(task, 3, base, span)
+                        ok, msg = self._run_single_step_sync(
+                            task, 3, progress_callback=lambda value, task_id=task.task_id:
+                            update_step_progress(3, task_id, value)
+                        )
                         if ok:
                             self.log_signal.emit(f"[流水线] [{task.source_name}] 混音完成")
                         else:
@@ -170,11 +172,7 @@ class PipelineMixin:
                             mark_failed(task.task_id)
                         self.task_finished.emit(task.task_id, ok)
                         # 混音进度按任务累计推进
-                        with progress_lock:
-                            mix_done += 1
-                            self.step_progress_signal.emit(
-                                3, int(mix_done * 100 / max(1, total_mix_tasks))
-                            )
+                        update_step_progress(3, task.task_id, 100)
                         mix_queue.task_done()
                 finally:
                     pass

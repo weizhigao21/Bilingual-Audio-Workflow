@@ -21,6 +21,25 @@ def make_tasks(root, paths):
 
 
 class WhisperSelectedImportTests(unittest.TestCase):
+    def test_batch_progress_counts_audio_inside_folder_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = root / "group" / "01.mp3"
+            second = root / "group" / "02.mp3"
+            third = root / "other" / "03.mp3"
+            for path in (first, second, third):
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(b"audio")
+            tasks = make_tasks(root, [first, second, third])
+            self.assertEqual(
+                WhisperBatchWorker._batch_task_ids([str(first.parent)], tasks),
+                {"task-0", "task-1"},
+            )
+            self.assertEqual(
+                WhisperBatchWorker._batch_task_ids([str(third)], tasks),
+                {"task-2"},
+            )
+
     def test_legacy_default_formats_are_upgraded(self):
         with tempfile.TemporaryDirectory() as temp:
             config_path = Path(temp) / "workflow.json"

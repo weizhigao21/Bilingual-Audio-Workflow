@@ -164,6 +164,9 @@ class ByStepMixin:
         worker.progress_signal.connect(
             lambda v: self.step_progress_signal.emit(1, v)
         )
+        worker.status_signal.connect(
+            lambda text: self.step_status_signal.emit(1, text)
+        )
         worker.task_result_signal.connect(on_task_result)
         worker.finished_signal.connect(on_finished)
 

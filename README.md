@@ -1,4 +1,4 @@
-# 双语音声工作流 v2.1.12
+# 双语音声工作流 v2.1.13
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
@@ -186,6 +186,11 @@ TTS 合成结果按 **文本、声音/模型、生成设置及 API 来源** 区�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v2.1.13 (2026-09-27)
+- 字幕进度按整批文件数和当前音频时间轴计算，跨文件识别时不再反复跳满、回退；进度条显示当前文件序号、识别位置，界面日志收起大量 VAD 和逐句输出
+- 流水线语音生成即时转发片段进度、剩余时间与日志；多个音频并行时按各任务进度汇总，进度条持续向前
+- 语音桥接改用线程完成等待，避免极快任务在等待循环启动前结束而卡住
 
 ### v2.1.12 (2026-09-27)
 - 修复 infer.exe 已写出字幕但退出阶段异常时整批误报失败：逐个核对字幕文件，已生成的继续进入后续步骤，仅缺失的报错
