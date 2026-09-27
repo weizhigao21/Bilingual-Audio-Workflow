@@ -109,7 +109,7 @@ class SingleStepMixin:
 
         worker.progress_signal.connect(on_progress, Qt.ConnectionType.DirectConnection)
         # 并发语音任务的状态带上文件名，便于区分哪个音频正在推进。
-        if hasattr(worker, 'status_signal'):
+        if hasattr(worker, 'status_signal') and not (step == 3 and progress_callback is not None):
             def on_status(text):
                 label = f"{task.source_name[:18]} · {text}" if step == 2 else text
                 self.step_status_signal.emit(step, label)

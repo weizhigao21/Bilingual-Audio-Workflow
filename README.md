@@ -1,4 +1,4 @@
-# 双语音声工作流 v2.1.14
+# 双语音声工作流 v2.1.15
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
@@ -186,6 +186,9 @@ TTS 合成结果按 **文本、声音/模型、生成设置及 API 来源** 区�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v2.1.15 (2026-09-27)
+- 语音生成和音频混音面板不再显示输出路径；混音进度条下显示当前执行的任务名（每个仅显示前四个字符），并行混音时列出全部正在执行的任务
 
 ### v2.1.14 (2026-09-27)
 - 语音生成的当前文件、片段进度和剩余时间改为显示在进度条下方，进度条只显示百分比；重新开始或结束时清除旧状态

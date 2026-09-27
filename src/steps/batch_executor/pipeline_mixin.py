@@ -67,6 +67,7 @@ class PipelineMixin:
             total_mix_tasks = 0
             tts_progress = {}
             mix_progress = {}
+            active_mix_names = {}
 
             # 只放需要处理的步骤（跳过已完成/已失败的任务）
             for task in self.tasks:
@@ -97,6 +98,17 @@ class PipelineMixin:
                     total_tasks = total_tts_tasks if step == 2 else total_mix_tasks
                     overall = int(sum(values.values()) / max(1, total_tasks))
                     self.step_progress_signal.emit(step, overall)
+
+            def update_mix_status(task, active):
+                with progress_lock:
+                    if active:
+                        active_mix_names[task.task_id] = task.source_name[:4]
+                    else:
+                        active_mix_names.pop(task.task_id, None)
+                    names = '，'.join(active_mix_names.values())
+                    self.step_status_signal.emit(
+                        3, f"当前任务：{names}" if names else ""
+                    )
 
             tts_done_event = threading.Event()
 
@@ -161,10 +173,14 @@ class PipelineMixin:
                         self.log_signal.emit(
                             f"[流水线] [{task.source_name}] 开始混音"
                         )
-                        ok, msg = self._run_single_step_sync(
-                            task, 3, progress_callback=lambda value, task_id=task.task_id:
-                            update_step_progress(3, task_id, value)
-                        )
+                        update_mix_status(task, True)
+                        try:
+                            ok, msg = self._run_single_step_sync(
+                                task, 3, progress_callback=lambda value, task_id=task.task_id:
+                                update_step_progress(3, task_id, value)
+                            )
+                        finally:
+                            update_mix_status(task, False)
                         if ok:
                             self.log_signal.emit(f"[流水线] [{task.source_name}] 混音完成")
                         else:

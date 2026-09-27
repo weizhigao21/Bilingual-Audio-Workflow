@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -12,13 +13,14 @@ from unittest.mock import patch
 
 import numpy as np
 from pydub import AudioSegment
+from PyQt6.QtCore import QCoreApplication, Qt
 
 from src.steps.audio_utils.mixing import mix_with_numpy, _finish_mix
 from src.steps.audio_utils.rms import compute_rms_db, compute_rms_envelope
 from src.steps.audio_utils.detection import detect_voice_onset
 from src.steps.audio_utils.common import _submit_pan_detection
 from src.steps.audio_utils.ffmpeg_utils import resample_audio, _run_ffmpeg, export_audio_ffmpeg
-from src.steps.step3_mixer import mix_single_task, _export_wav_24bit
+from src.steps.step3_mixer import mix_single_task, _export_wav_24bit, MixerBatchWorker
 from src.steps.audio_utils import clear_mix_cache
 from src.task_manager import TaskInfo
 
@@ -35,6 +37,33 @@ def tone(seconds=1, sr=48000, frequency=1000, amplitude=10000):
 
 
 class MixingTests(unittest.TestCase):
+    def test_parallel_batch_status_lists_only_running_short_names(self):
+        app = QCoreApplication.instance() or QCoreApplication([])
+        barrier = threading.Barrier(2, timeout=5)
+        statuses = []
+
+        def fake_mix(task, config, log_callback=None, progress_callback=None,
+                     stop_check=None):
+            progress_callback(50)
+            barrier.wait()
+            return True, 'output'
+
+        with tempfile.TemporaryDirectory() as folder:
+            tasks = [TaskInfo(task_id, str(Path(folder) / f'{name}.wav'),
+                              name, folder)
+                     for task_id, name in (('first', 'to11_more'),
+                                           ('second', 'to22_more'))]
+            worker = MixerBatchWorker(tasks, SimpleNamespace(mixer_cfg={'thread_count': 2}))
+            worker.status_signal.connect(statuses.append, Qt.ConnectionType.DirectConnection)
+            with patch('src.steps.step3_mixer.mix_single_task', fake_mix), \
+                 patch('src.steps.step3_mixer.clear_mix_cache'):
+                worker.run()
+
+        self.assertTrue(any(set(text.removeprefix('当前任务：').split('，'))
+                            == {'to11', 'to22'} for text in statuses))
+        self.assertEqual(statuses[-1], '')
+        self.assertIsNotNone(app)
+
     def test_24bit_pcm_values_and_classic_header(self):
         import wave
         values = np.array([-(2**31), -257, -1, 0, 1, 257, 2**31-1], dtype=np.int32)

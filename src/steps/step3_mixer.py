@@ -312,6 +312,7 @@ class MixerWorker(QThread):
     """音频混音工作线程（单任务）。"""
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)         # 0-100
+    status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)   # (success, output_path_or_error)
 
     def __init__(self, task: TaskInfo, config: WorkflowConfig):
@@ -329,6 +330,7 @@ class MixerWorker(QThread):
         return self._stop_flag
 
     def run(self):
+        self.status_signal.emit(f"当前任务：{self.task.source_name[:4]}")
         ok, msg = mix_single_task(
             self.task, self.config,
             log_callback=self.log_signal.emit,
@@ -384,31 +386,22 @@ class MixerBatchWorker(QThread):
 
         success_count = 0
         fail_count = 0
-        completed = 0
-        total = len(self.tasks)
         lock = threading.Lock()
-        # future -> 进度槽：pct=任务内进度 0-100，last=上次发状态文本的进度
-        slots = {}
+        # 预先分配所有任务的进度槽，线程启动后不再改动字典结构。
+        slots = {task.task_id: {"pct": 0} for task in self.tasks}
+        active_names = {}
 
         def _avg_pct():
             # 总进度 = 所有任务内部进度的平均值（结束的任务保持 100），
             # 这样并行混音时进度条随任务内部阶段平滑前进
-            if not slots:
-                return 0
             return int(sum(s["pct"] for s in slots.values()) / len(slots))
 
         def _on_task_progress(slot, pct):
             pct = max(0, min(100, int(pct)))
-            status = None
             with lock:
                 slot["pct"] = pct
-                if pct - slot.get("last", -1) >= 5:  # 节流：每 5% 更新一次状态文本
-                    slot["last"] = pct
-                    status = f"混音中 {completed}/{total} · 当前 {slot['name']}"
                 avg = _avg_pct()
             self.progress_signal.emit(min(avg, 99))
-            if status:
-                self.status_signal.emit(status)
 
         def _make_progress(slot):
             def _p(v):
@@ -424,17 +417,29 @@ class MixerBatchWorker(QThread):
                         self.log_signal.emit(f"[{task_name}] {msg}")
                     return _log
 
+                def _run_task(task, slot):
+                    with lock:
+                        active_names[task.task_id] = task.source_name[:4]
+                        self.status_signal.emit(
+                            f"当前任务：{'，'.join(active_names.values())}"
+                        )
+                    try:
+                        return mix_single_task(
+                            task, self.config,
+                            _make_log(task.source_name),
+                            _make_progress(slot),
+                            self._check_stop,
+                        )
+                    finally:
+                        with lock:
+                            active_names.pop(task.task_id, None)
+                            names = '，'.join(active_names.values())
+                            self.status_signal.emit(f"当前任务：{names}" if names else "")
+
                 future_to_task = {}
                 for task in self.tasks:
-                    slot = {"pct": 0, "last": -1, "name": task.source_name}
-                    fut = executor.submit(
-                        mix_single_task,
-                        task, self.config,
-                        _make_log(task.source_name),
-                        _make_progress(slot),
-                        self._check_stop,
-                    )
-                    slots[fut] = slot
+                    slot = slots[task.task_id]
+                    fut = executor.submit(_run_task, task, slot)
                     future_to_task[fut] = task
 
                 for future in as_completed(future_to_task):
@@ -463,14 +468,10 @@ class MixerBatchWorker(QThread):
 
                     # 任务结束即占满份额，平均进度随之推进
                     with lock:
-                        slots[future]["pct"] = 100
+                        slots[task.task_id]["pct"] = 100
                     self.task_result_signal.emit(task.task_id, ok, msg)
 
-                    completed += 1
                     self.progress_signal.emit(min(_avg_pct(), 99))
-                    self.status_signal.emit(
-                        f"混音 {completed}/{total} · {task.source_name}"
-                    )
         finally:
             self._executor = None
 

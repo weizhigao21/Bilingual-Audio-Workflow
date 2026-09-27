@@ -41,7 +41,7 @@ class StepPanel(QFrame):
         self.progress.setFormat("%p%")
         layout.addWidget(self.progress)
 
-        # 语音生成的片段/剩余时间信息单独显示，避免挤占百分比。
+        # 语音片段和当前混音任务显示在进度条下方。
         self.detail_label = QLabel("")
         self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
         self.detail_label.setStyleSheet("color: #666; font-size: 11px;")
@@ -53,6 +53,7 @@ class StepPanel(QFrame):
         self.output_label = QLabel("输出：—")
         self.output_label.setStyleSheet("color: #666; font-size: 11px;")
         self.output_label.setWordWrap(True)
+        self.output_label.setVisible(self.step_number == 1)
         layout.addWidget(self.output_label)
 
         # 按钮
@@ -86,6 +87,8 @@ class StepPanel(QFrame):
         self.detail_label.setVisible(bool(text))
 
     def set_output(self, path: str):
+        if self.step_number != 1:
+            return
         if path:
             display = path if len(path) < 80 else "..." + path[-77:]
             self.output_label.setText(f"输出：<a href='file:///{path}'>{display}</a>")

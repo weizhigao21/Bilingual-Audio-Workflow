@@ -23,7 +23,8 @@ class FakePipeline(PipelineMixin):
         self._stop_flag=False
         self.ran=[]
         self.whisper_batches=0
-        for name in ('log_signal','task_finished','task_started','progress_signal','step_progress_signal'):
+        for name in ('log_signal','task_finished','task_started','progress_signal',
+                     'step_progress_signal','step_status_signal'):
             setattr(self,name,Signal())
 
     def _resolve_source_path(self, task):
@@ -106,6 +107,33 @@ class PipelineTests(unittest.TestCase):
             self.assertIn(40, values)
             self.assertIn(45, values)
             self.assertEqual(values[-1], 100)
+
+    def test_parallel_mix_status_lists_active_short_names(self):
+        class ParallelMixPipeline(FakePipeline):
+            def __init__(self, tasks):
+                super().__init__(tasks[0], [3])
+                self.tasks = tasks
+                self.barrier = threading.Barrier(2, timeout=5)
+
+            def _run_single_step_sync(self, task, step, *args, progress_callback=None):
+                self.barrier.wait()
+                progress_callback(100)
+                task.set_step_status(step, STEP_DONE)
+                return True, 'ok'
+
+        with tempfile.TemporaryDirectory() as folder:
+            tasks = [TaskInfo(task_id, str(Path(folder) / f'{name}.wav'),
+                              name, folder, step1_status=STEP_SKIPPED,
+                              step2_status=STEP_SKIPPED)
+                     for task_id, name in (('first', 'to11_more'),
+                                           ('second', 'to22_more'))]
+            pipeline = ParallelMixPipeline(tasks)
+            self.assertEqual(pipeline._run_pipeline(2), (2, 0, 0))
+            statuses = [text for step, text in pipeline.step_status_signal.calls
+                        if step == 3]
+            self.assertTrue(any(set(text.removeprefix('当前任务：').split('，'))
+                                == {'to11', 'to22'} for text in statuses))
+            self.assertEqual(statuses[-1], '')
 
 
 if __name__ == '__main__':

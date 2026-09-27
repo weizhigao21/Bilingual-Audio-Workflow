@@ -144,9 +144,9 @@ class StepMixin:
         panel.progress.setValue(max(0, min(100, value)))
 
     def _on_step_status(self, step: int, text: str):
-        """语音信息单独显示，其余步骤沿用进度条状态文本。"""
+        """语音和混音状态显示在进度条下方，保留进度条百分比。"""
         panel = self.step_panels[step]
-        if step == 2:
+        if step in (2, 3):
             panel.progress.setFormat("%p%")
             panel.set_detail(text)
         else:
