@@ -21,8 +21,8 @@ class ByStepMixin:
             step_name = {1: "字幕提取", 2: "语音生成", 3: "音频混音"}.get(step, f"步骤{step}")
             self.log_signal.emit(f"\n[批量] ===== {step_name}(步骤{step}): 处理全部 {total} 个任务 =====")
 
-            # 步骤1启用批量处理时，一次性处理所有任务
-            if step == 1 and self.config.whisper_cfg.get("enable_batching", False):
+            # 多文件统一交给字幕工作器；--enable_batching 仅控制 infer 内部批处理。
+            if step == 1:
                 self._run_whisper_batch(total, failed_tasks)
                 continue
 
@@ -100,7 +100,9 @@ class ByStepMixin:
         return success, fail, skipped
 
     def _run_whisper_batch(self, total: int, failed_tasks: set):
-        """步骤1批量处理：按源目录集中识别待处理任务。"""
+        """步骤1批量处理：按导入根目录集中识别待处理任务。"""
+        if self._stop_flag:
+            return
         # 收集所有需要处理 step1 的任务
         pending_tasks = []
         for i, task in enumerate(self.tasks):
@@ -111,6 +113,10 @@ class ByStepMixin:
                 continue
             if status == STEP_RUNNING:
                 self.log_signal.emit(f"[批量] [{task.source_name}] 步骤1 正在运行，跳过")
+                continue
+            if not self._resolve_source_path(task):
+                failed_tasks.add(task.task_id)
+                self.task_finished.emit(task.task_id, False)
                 continue
             if not task.is_step_ready(1):
                 self.log_signal.emit(f"[批量] [{task.source_name}] 步骤1 前置未完成，标记失败")
@@ -123,7 +129,7 @@ class ByStepMixin:
             self.log_signal.emit("[批量] 步骤1 无待处理任务")
             return
 
-        self.log_signal.emit(f"[批量] 步骤1 批量模式: 一次性处理 {len(pending_tasks)} 个任务")
+        self.log_signal.emit(f"[批量] 步骤1 集中处理 {len(pending_tasks)} 个任务")
         self.progress_signal.emit(0, total, 1)
 
         # 标记所有任务为 running

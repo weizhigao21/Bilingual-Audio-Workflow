@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
 from ..task_manager import TaskQueue, STEP_DONE, STEP_RUNNING
 from ..folder_import import build_folder_import_plan, find_matching_subtitle
-from ..widgets.folder_import_dialog import FolderImportPreviewDialog
 from .common import VIDEO_EXTS, SUBTITLE_EXTS, MIX_AUDIO_EXTS
 
 
@@ -81,18 +80,27 @@ class ToolbarMixin:
             self._append_log(f"[文件夹] 未找到支持的媒体文件: {folder_name}")
             return
 
-        dialog = FolderImportPreviewDialog(folder, candidates, self)
-        if dialog.exec() != dialog.DialogCode.Accepted:
-            self._append_log(f"[文件夹] 已取消导入: {folder_name}")
-            return
-        selected = dialog.selected_candidates()
+        selected = []
+        seen_outputs = set()
+        for candidate in candidates:
+            if not candidate.default_selected or not os.path.isfile(candidate.source_path):
+                continue
+            output = os.path.normcase(os.path.abspath(candidate.output_path))
+            if output in seen_outputs:
+                self._append_log(
+                    f"[文件夹] 跳过 {candidate.relative_path}: 与其他任务的混音输出路径相同"
+                )
+                continue
+            seen_outputs.add(output)
+            selected.append(candidate)
         if not selected:
+            self._append_log(f"[文件夹] 没有可导入的源媒体文件: {folder_name}")
             return
 
         # 创建文件夹任务组
         group = self.task_queue.create_group(folder)
         self._append_log(
-            f"[文件夹] 导入: {folder_name} (发现 {len(candidates)} 个媒体文件，选择 {len(selected)} 个)"
+            f"[文件夹] 导入: {folder_name} (发现 {len(candidates)} 个媒体文件，自动加入 {len(selected)} 个)"
         )
 
         for candidate in selected:

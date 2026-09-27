@@ -7,14 +7,12 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from src.folder_import import build_folder_import_plan, find_matching_subtitle
 from src.steps.output_paths import planned_mix_output
 from src.steps.step3_mixer import mix_single_task
 from src.task_manager import TaskInfo, TaskQueue
-from src.widgets.folder_import_dialog import FolderImportPreviewDialog
 from src.workflow_gui.window import WorkflowMainWindow
 
 
@@ -127,47 +125,36 @@ class FolderImportTests(unittest.TestCase):
         self.assertIn("源文件相同", message)
         self.assertEqual(source.read_bytes(), before)
 
-    def test_dialog_folder_selection_and_output_collision(self):
-        self.make("A/one.mp3")
-        self.make("A/sub/two.mp3")
-        plan = self.plan()
-        dialog = FolderImportPreviewDialog(str(self.root), plan)
-        self.addCleanup(dialog.close)
-        self.assertEqual(len(dialog.selected_candidates()), 2)
-        parent = dialog.tree.topLevelItem(0)
-        parent.setCheckState(0, Qt.CheckState.Unchecked)
-        self.assertEqual(dialog.selected_candidates(), [])
-        self.assertFalse(dialog.import_button.isEnabled())
-        parent.setCheckState(0, Qt.CheckState.Checked)
-        self.assertEqual(len(dialog.selected_candidates()), 2)
-
-        self.make("B/one.mp3")
-        conflict_dialog = FolderImportPreviewDialog(str(self.root), self.plan())
-        self.addCleanup(conflict_dialog.close)
-        self.assertFalse(conflict_dialog.import_button.isEnabled())
-        self.assertIn("冲突", conflict_dialog.summary.text())
-
-    def test_folder_button_and_drop_use_preview_selection(self):
+    def test_folder_import_and_drop_do_not_open_preview(self):
         included = self.make("A/one.mp3")
-        self.make("B/two.mp3")
+        second = self.make("B/two.mp3")
+        self.make("双语/old_mixed.mp3")
         config = SimpleNamespace(
             workspace_dir=str(Path(self.temp.name) / "tasks"),
             tts_cfg={}, mixer_cfg=self.cfg,
         )
         window = WorkflowMainWindow(config)
         self.addCleanup(window.close)
-        candidates = self.plan()
-        chosen = [c for c in candidates if c.source_path == str(included)]
-        with patch("src.workflow_gui.toolbar_mixin.FolderImportPreviewDialog") as preview:
-            preview.return_value.exec.return_value = preview.return_value.DialogCode.Accepted
-            preview.return_value.selected_candidates.return_value = chosen
+        with patch("src.workflow_gui.toolbar_mixin.QMessageBox") as message_box:
             window._scan_folder_for_tasks(str(self.root))
-            self.assertEqual(len(window.task_queue.tasks), 1)
-            self.assertEqual(window.task_queue.tasks[0].source_path, str(included))
+            self.assertEqual({t.source_path for t in window.task_queue.tasks},
+                             {str(included), str(second)})
             window.on_files_dropped([str(self.root)])
-            self.assertEqual(preview.call_count, 2)
-            second_plan = preview.call_args_list[1].args[1]
-            self.assertTrue(next(c for c in second_plan if c.source_path == str(included)).locked)
+            self.assertEqual(len(window.task_queue.tasks), 2)
+            message_box.assert_not_called()
+
+    def test_output_collision_auto_skips_duplicate_target(self):
+        first = self.make("A/one.mp3")
+        self.make("B/one.mp3")
+        config = SimpleNamespace(
+            workspace_dir=str(Path(self.temp.name) / "tasks"),
+            tts_cfg={}, mixer_cfg=self.cfg,
+        )
+        window = WorkflowMainWindow(config)
+        self.addCleanup(window.close)
+        window._scan_folder_for_tasks(str(self.root))
+        self.assertEqual(len(window.task_queue.tasks), 1)
+        self.assertEqual(window.task_queue.tasks[0].source_path, str(first))
 
 
 if __name__ == "__main__":

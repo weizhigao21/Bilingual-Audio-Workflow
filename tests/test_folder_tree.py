@@ -128,6 +128,21 @@ class FolderTreeTests(unittest.TestCase):
         self.assertIsNone(window._current_group)
         self.assertEqual(window.current_task_label.text(), "未选择任务")
 
+    def test_group_subtitles_use_batch_mode(self):
+        config = SimpleNamespace(workspace_dir=str(self.root / "batch-workspace"),
+                                 tts_cfg={}, whisper_cfg={"enable_batching": False},
+                                 mixer_cfg={})
+        window = WorkflowMainWindow(config)
+        self.addCleanup(window.close)
+        group = window.task_queue.create_group(str(self.media_root))
+        source = self.media_root / "chapter.wav"
+        source.write_bytes(b"audio")
+        window.task_queue.add_task(str(source), group_id=group.group_id)
+        with patch("src.steps.batch_executor.BatchExecutor.start"):
+            window._start_group_step(group, 1)
+        self.assertEqual(window._batch_executor.order, "by_step")
+        window._batch_executor = None
+
 
 if __name__ == "__main__":
     unittest.main()

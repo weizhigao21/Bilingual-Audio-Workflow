@@ -84,7 +84,7 @@ class StepMixin:
             self._append_log(f"[步骤{step}] 正在停止...")
 
     def _start_group_step(self, group: TaskGroup, step: int):
-        """对文件夹组内所有任务逐个执行指定步骤（复用批量执行器）。"""
+        """执行文件夹组的指定步骤；字幕按文件夹集中提取。"""
         if self._batch_executor:
             QMessageBox.warning(self, "提示", "已有批量执行正在进行中，请先停止。")
             return
@@ -114,7 +114,8 @@ class StepMixin:
             p.progress.setRange(0, 100)
             p.progress.setValue(0)
         self._batch_executor = BatchExecutor(
-            list(group.tasks), [step], self.config, order="by_task", parent=self
+            list(group.tasks), [step], self.config,
+            order="by_step" if step == 1 else "by_task", parent=self
         )
         self._connect_batch_signals()
         self.batch_btn.setEnabled(False)
@@ -122,7 +123,7 @@ class StepMixin:
         for panel in self.step_panels.values():
             panel.start_btn.setEnabled(False)
         self._append_log(
-            f"[文件夹] 开始逐个执行: 「{group.group_name}」步骤{step} "
+            f"[文件夹] 开始执行: 「{group.group_name}」步骤{step} "
             f"({len(group.tasks)} 个任务)"
         )
         self._batch_executor.start()

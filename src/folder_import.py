@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""文件夹导入预览的数据规划，与界面分离以便复用和验证。"""
+"""文件夹自动导入的数据规划、字幕匹配与安全过滤。"""
 import os
 from dataclasses import dataclass
 

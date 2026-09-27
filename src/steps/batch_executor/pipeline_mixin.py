@@ -3,7 +3,7 @@
 import queue
 import threading
 
-from ...task_manager import STEP_DONE, STEP_SKIPPED, STEP_RUNNING
+from ...task_manager import STEP_DONE, STEP_SKIPPED
 
 
 class PipelineMixin:
@@ -13,7 +13,7 @@ class PipelineMixin:
         """流水线模式：字幕先全部完成，然后语音与混音交错并行。
 
         调度策略：
-          1. 字幕（步骤1）逐个串行完成，失败的进入 failed 集合
+          1. 字幕（步骤1）按导入文件夹集中完成，失败的进入 failed 集合
           2. 语音生成（步骤2）：tts_workers 个线程并行处理就绪任务，
              每个任务完成后立即放入混音队列
           3. 混音（步骤3）：mix_workers 个线程（默认1）从混音队列取任务，
@@ -33,41 +33,7 @@ class PipelineMixin:
         # ---------- 阶段1：字幕（只跑步骤1） ----------
         if 1 in self.steps:
             self.log_signal.emit(f"\n[流水线] ==== 阶段1 字幕提取: 共 {total} 个任务 ====")
-            for i, task in enumerate(self.tasks):
-                if self._stop_flag:
-                    break
-                if task.step_status(1) in (STEP_DONE, STEP_SKIPPED):
-                    continue
-                if task.step_status(1) == STEP_RUNNING:
-                    continue
-                # 源文件检查：不存在且无法自动修复 → 跳过任务
-                if not self._resolve_source_path(task):
-                    self.log_signal.emit(f"[流水线] [{task.source_name}] 源文件不存在，跳过任务")
-                    mark_failed(task.task_id)
-                    self.task_finished.emit(task.task_id, False)
-                    continue
-                if not task.is_step_ready(1):
-                    mark_failed(task.task_id)
-                    self.task_finished.emit(task.task_id, False)
-                    continue
-                self.task_started.emit(task.task_id)
-                self.progress_signal.emit(i, total, 1)
-                denom = max(1, total)
-                self.log_signal.emit(
-                    f"[流水线] [{task.source_name}] 开始字幕提取"
-                )
-                ok, msg = self._run_single_step_sync(
-                    task, 1,
-                    int(i * 100 / denom), int(100 / denom)
-                )
-                self.step_progress_signal.emit(1, int((i + 1) * 100 / denom))
-                # 无论成功失败都通知刷新任务列表（成功也要发，否则列表不更新进度）
-                self.task_finished.emit(task.task_id, ok)
-                if ok:
-                    self.log_signal.emit(f"[流水线] [{task.source_name}] 字幕完成")
-                else:
-                    self.log_signal.emit(f"[流水线] [{task.source_name}] 字幕失败: {msg}")
-                    mark_failed(task.task_id)
+            self._run_whisper_batch(total, failed)
             self.log_signal.emit("[流水线] 阶段1 字幕提取完成")
 
         # ---------- 阶段2：语音 + 混音流水线 ----------

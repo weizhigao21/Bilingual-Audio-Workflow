@@ -21,6 +21,7 @@ class FakePipeline(PipelineMixin):
         self.config=SimpleNamespace(tts_cfg={'pipeline_tts_workers':2}, mixer_cfg={'thread_count':2})
         self._stop_flag=False
         self.ran=[]
+        self.whisper_batches=0
         for name in ('log_signal','task_finished','task_started','progress_signal','step_progress_signal'):
             setattr(self,name,Signal())
 
@@ -32,8 +33,22 @@ class FakePipeline(PipelineMixin):
         task.set_step_status(step, STEP_DONE)
         return True, 'ok'
 
+    def _run_whisper_batch(self, total, failed):
+        self.whisper_batches += 1
+        for task in self.tasks:
+            task.set_step_status(1, STEP_DONE)
+            self.task_finished.emit(task.task_id, True)
+
 
 class PipelineTests(unittest.TestCase):
+    def test_subtitles_use_one_batch_before_pipeline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            task=TaskInfo('id',str(Path(folder)/'src.wav'),'src',folder)
+            pipeline=FakePipeline(task,[1])
+            self.assertEqual(pipeline._run_pipeline(1),(1,0,0))
+            self.assertEqual(pipeline.whisper_batches,1)
+            self.assertEqual(pipeline.ran,[])
+
     def test_only_tts_does_not_start_mixing(self):
         with tempfile.TemporaryDirectory() as folder:
             task=TaskInfo('id',str(Path(folder)/'src.wav'),'src',folder,

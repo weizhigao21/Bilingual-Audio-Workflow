@@ -211,8 +211,8 @@ class WhisperWorker(QThread):
 class WhisperBatchWorker(QThread):
     """字幕提取批量工作线程。
 
-    按源目录分组，将选中任务的文件硬链接到临时输入目录供 infer.exe 扫描。
-    每组只加载一次模型；不支持硬链接时逐个识别选中任务。
+    按导入根目录分组，将任务文件硬链接到临时输入目录供 infer.exe 扫描。
+    文件名不冲突时每组只加载一次模型；不支持硬链接时逐个识别。
 
     信号:
         log_signal: 日志
@@ -307,6 +307,50 @@ class WhisperBatchWorker(QThread):
             finally:
                 self._single_worker = None
 
+    def _input_batches(self):
+        """同一次文件夹导入尽量一批；同名音频拆批以免字幕在平铺输出目录互相覆盖。"""
+        roots = {}
+        for task in self.tasks:
+            root = (task.import_folder if task.from_folder and task.import_folder
+                    else os.path.dirname(task.source_path))
+            roots.setdefault(os.path.normcase(os.path.abspath(root)), []).append(task)
+        batches = []
+        for root, tasks in roots.items():
+            lanes = []
+            lane_names = []
+            for task in tasks:
+                name = task.source_name.casefold()
+                for lane, names in zip(lanes, lane_names):
+                    if name not in names:
+                        lane.append(task)
+                        names.add(name)
+                        break
+                else:
+                    lanes.append([task])
+                    lane_names.append({name})
+            batches.extend((root, lane) for lane in lanes)
+        return batches
+
+    @staticmethod
+    def _direct_input_folder(root, tasks, audio_suffixes):
+        """平铺目录的全部媒体都在当前批次时直接交给 infer.exe。"""
+        if not tasks or not os.path.isdir(root):
+            return ""
+        if any(os.path.normcase(os.path.abspath(os.path.dirname(task.source_path))) != root
+               for task in tasks):
+            return ""
+        extensions = {"." + ext.strip().lower().lstrip(".")
+                      for ext in str(audio_suffixes).split(",") if ext.strip()}
+        found = set()
+        for directory, _, filenames in os.walk(root):
+            for filename in filenames:
+                if os.path.splitext(filename)[1].lower() in extensions:
+                    found.add(os.path.normcase(os.path.abspath(
+                        os.path.join(directory, filename)
+                    )))
+        selected = {os.path.normcase(os.path.abspath(task.source_path)) for task in tasks}
+        return root if found == selected else ""
+
     def _run_impl(self):
         whisper_dir = self.config.whisper_dir
         infer_exe = os.path.join(whisper_dir, "infer.exe")
@@ -323,11 +367,7 @@ class WhisperBatchWorker(QThread):
         self._temp_output = tmp_output
         self.log_signal.emit(f"[字幕批量] 临时输出目录: {tmp_output}")
 
-        # 按源文件所在目录分组；不同子目录可能有同名文件，必须隔离输出。
-        groups = {}
-        for t in self.tasks:
-            folder = os.path.dirname(t.source_path)
-            groups.setdefault(folder, []).append(t)
+        batches = self._input_batches()
 
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         progress_patterns = [
@@ -335,27 +375,36 @@ class WhisperBatchWorker(QThread):
             re.compile(r"(\d+)/(\d+)"),
         ]
 
-        for gi, (folder, group_tasks) in enumerate(groups.items()):
+        for gi, (folder, group_tasks) in enumerate(batches):
             out_dir = os.path.join(tmp_output, str(gi))
             os.makedirs(out_dir, exist_ok=True)
 
-            # infer.exe 的目录参数会扫描整个目录。用同卷硬链接临时目录仅暴露
-            # 当前任务文件，避免识别预览中取消选择的音频和已有混音成品。
-            try:
-                self._staging_dir = tempfile.mkdtemp(prefix=".whisper-selected-", dir=folder)
-                for task in group_tasks:
-                    os.link(task.source_path, os.path.join(
-                        self._staging_dir, os.path.basename(task.source_path)
-                    ))
-            except OSError:
-                self._cleanup_staging()
-                self._run_single_fallback(group_tasks)
-                if self._stop_flag:
-                    self._finish_stopped()
-                    return
-                continue
+            # 文件夹中全是本批任务时直接扫描原目录；否则用同卷硬链接临时目录
+            # 隔离已移除、已完成和疑似成品文件。嵌套子目录也可扁平化为一次输入。
+            input_folder = self._direct_input_folder(
+                folder, group_tasks,
+                cfg.get("audio_suffixes", "wav,flac,mp3,mp4,mkv,avi,mov"),
+            )
+            if not input_folder:
+                try:
+                    staging_parent = os.path.dirname(group_tasks[0].source_path)
+                    self._staging_dir = tempfile.mkdtemp(
+                        prefix=".whisper-selected-", dir=staging_parent
+                    )
+                    for task in group_tasks:
+                        os.link(task.source_path, os.path.join(
+                            self._staging_dir, os.path.basename(task.source_path)
+                        ))
+                    input_folder = self._staging_dir
+                except OSError:
+                    self._cleanup_staging()
+                    self._run_single_fallback(group_tasks)
+                    if self._stop_flag:
+                        self._finish_stopped()
+                        return
+                    continue
 
-            # 构建命令行（infer.exe 只扫描临时目录中的选中音频）
+            # 构建命令行（只扫描本批任务覆盖的输入目录）
             cmd = [
                 infer_exe,
                 "--output_dir", out_dir,
@@ -367,8 +416,9 @@ class WhisperBatchWorker(QThread):
                 "--vad_min_silence_duration_ms", str(cfg.get("vad_min_silence_duration_ms", 500)),
                 "--vad_min_speech_duration_ms", str(cfg.get("vad_min_speech_duration_ms", 0)),
                 "--vad_speech_pad_ms", str(cfg.get("vad_speech_pad_ms", 400)),
-                "--enable_batching",
             ]
+            if cfg.get("enable_batching", False):
+                cmd.append("--enable_batching")
             if cfg.get("overwrite", False):
                 cmd.append("--overwrite")
             # 合并段落
@@ -380,10 +430,10 @@ class WhisperBatchWorker(QThread):
                 ])
             else:
                 cmd.append("--no_merge_segments")
-            cmd.append(self._staging_dir)
+            cmd.append(input_folder)
 
             self.log_signal.emit(
-                f"[字幕批量] 启动({gi + 1}/{len(groups)}): {folder}, "
+                f"[字幕批量] 启动({gi + 1}/{len(batches)}): {folder}, "
                 f"设备={cfg.get('device', 'auto')}, 精度={cfg.get('compute_type', 'auto')}"
             )
 
