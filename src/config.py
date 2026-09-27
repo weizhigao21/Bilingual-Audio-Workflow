@@ -30,6 +30,11 @@ def get_config_path():
     return str(get_base_path() / "resources" / "configs" / "workflow_config.json")
 
 
+LEGACY_WHISPER_MEDIA_SUFFIXES = "wav,flac,mp3,mp4,mkv,avi,mov"
+WHISPER_MEDIA_SUFFIXES = (
+    "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv,ts"
+)
+
 # 默认配置
 DEFAULT_CONFIG = {
     "subprojects": {
@@ -40,7 +45,7 @@ DEFAULT_CONFIG = {
         "device": "auto",
         "compute_type": "auto",
         "sub_formats": "lrc",
-        "audio_suffixes": "wav,flac,mp3,mp4,mkv,avi,mov",
+        "audio_suffixes": WHISPER_MEDIA_SUFFIXES,
         "enable_batching": False,
         "overwrite": False,
         "vad_threshold": 0.5,
@@ -139,6 +144,9 @@ class WorkflowConfig:
                 with open(path, "r", encoding="utf-8") as f:
                     saved = json.load(f)
                 self.config = _deep_merge(DEFAULT_CONFIG, saved)
+                # 旧版未提供格式编辑入口；升级旧默认值以覆盖导入器支持的格式。
+                if self.config["whisper"].get("audio_suffixes") == LEGACY_WHISPER_MEDIA_SUFFIXES:
+                    self.config["whisper"]["audio_suffixes"] = WHISPER_MEDIA_SUFFIXES
             except Exception as e:
                 print(f"[配置] 加载失败，使用默认配置: {e}")
 
