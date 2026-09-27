@@ -35,6 +35,36 @@ STEP_FAILED = "failed"
 STEP_SKIPPED = "skipped"
 
 
+def generated_import_reason(root: str, source_path: str, custom_output: str = "") -> str:
+    """指出目录扫描中疑似混音成品的原因；显式选择根目录本身不受目录规则影响。"""
+    root = os.path.normcase(os.path.abspath(root))
+    source_path = os.path.normcase(os.path.abspath(source_path))
+    source_dir = os.path.dirname(source_path)
+    if custom_output:
+        custom = os.path.normcase(os.path.abspath(custom_output))
+        try:
+            if custom != root and os.path.commonpath([root, custom]) == root:
+                if os.path.commonpath([custom, source_dir]) == custom:
+                    return "位于自定义导出目录"
+        except ValueError:
+            pass
+    try:
+        relative_dir = os.path.relpath(source_dir, root)
+    except ValueError:
+        relative_dir = "."
+    if relative_dir != ".":
+        for part in relative_dir.split(os.sep):
+            if part == "双语" or part.startswith("双语-"):
+                return "位于疑似混音输出目录"
+            if part.startswith(".whisper-selected-"):
+                return "位于字幕提取临时目录"
+    if os.path.isfile(source_path + ".mix.json"):
+        return "存在混音制作记录"
+    if os.path.splitext(os.path.basename(source_path))[0].endswith("_mixed"):
+        return "文件名以 _mixed 结尾"
+    return ""
+
+
 @dataclass
 class TaskInfo:
     """单个任务的信息。"""
@@ -487,15 +517,22 @@ class TaskQueue(QObject):
 
     # ---------- 文件夹组管理 ----------
     @staticmethod
-    def scan_folder_media(folder: str) -> list:
+    def scan_folder_media(folder: str, include_generated=False,
+                          custom_output="") -> list:
         """递归扫描文件夹中的媒体文件，返回绝对路径列表（自然排序）。"""
         media = []
         for root, dirs, files in os.walk(folder):
-            # 默认混音输出位于源目录的“双语/”内；重复导入时不能再当源媒体。
-            dirs[:] = [d for d in dirs if d != "双语"]
+            if not include_generated:
+                dirs[:] = [d for d in dirs if not generated_import_reason(
+                    folder, os.path.join(root, d, "candidate.mp3"), custom_output
+                )]
             for f in files:
                 if os.path.splitext(f)[1].lower() in TaskQueue.VIDEO_EXTS:
-                    media.append(os.path.join(root, f))
+                    path = os.path.join(root, f)
+                    if include_generated or not generated_import_reason(
+                        folder, path, custom_output
+                    ):
+                        media.append(path)
         return sorted(media, key=_natural_key)
 
     def create_group(self, folder_path: str) -> TaskGroup:

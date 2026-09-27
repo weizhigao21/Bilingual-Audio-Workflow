@@ -32,6 +32,7 @@ from .audio_utils import (
 from .audio_utils.ffmpeg_utils import probe_audio
 from .stream_mixer import mix_streaming_task
 from .audio_metadata import mix_metadata_options, write_provenance
+from .output_paths import planned_mix_output
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"}
@@ -108,33 +109,14 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         return False, f"配音目录不存在: {mix_folder}"
 
     cfg = config.mixer_cfg
-    # 导出目录优先级：
-    # 1. 自定义目录（output_folder）
-    # 2. 文件夹导入 + 输出前缀配置：父目录/双语-<源文件夹名>（输出直接在该目录根，
-    #    不嵌套"双语"子目录；源文件夹本身已带"双语-"前缀时直接输出到其根目录）
-    # 3. 默认：源文件同目录下的"双语"子文件夹
-    custom_output = cfg.get("output_folder", "").strip()
-    if custom_output:
-        output_folder = custom_output
-    elif task.from_folder and cfg.get("output_folder_prefix", False):
-        src_dir = os.path.dirname(original_path)
-        parent = os.path.dirname(src_dir)
-        dir_name = os.path.basename(src_dir)
-        if dir_name.startswith("双语-"):
-            # 源文件夹已是双语- 前缀（重跑/已重命名过），直接输出到其根目录
-            output_folder = src_dir
-        else:
-            output_folder = os.path.join(parent, f"双语-{dir_name}")
-    else:
-        output_folder = os.path.join(os.path.dirname(original_path), "双语")
+    final_output = planned_mix_output(original_path, cfg, task.from_folder)
+    if os.path.normcase(os.path.abspath(final_output)) == os.path.normcase(os.path.abspath(original_path)):
+        return False, "混音输出路径与源文件相同，请更改导出目录或启用 _mixed 后缀"
+    output_folder = os.path.dirname(final_output)
     os.makedirs(output_folder, exist_ok=True)
 
     is_video = os.path.splitext(original_path)[1].lower() in VIDEO_EXTENSIONS
     output_format = cfg.get("output_format", "mp4" if is_video else "mp3")
-    suffix = "_mixed" if cfg.get("add_suffix", True) else ""
-    final_output = os.path.join(
-        output_folder, f"{task.source_name}{suffix}.{output_format}"
-    )
 
     _log(f"[音频混音] 启动: {os.path.basename(original_path)}")
     _log(f"[音频混音] 配音目录: {mix_folder}")

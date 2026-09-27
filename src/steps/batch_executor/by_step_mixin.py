@@ -100,7 +100,7 @@ class ByStepMixin:
         return success, fail, skipped
 
     def _run_whisper_batch(self, total: int, failed_tasks: set):
-        """步骤1批量处理：一次性把所有待处理任务的源文件传给 infer.exe。"""
+        """步骤1批量处理：按源目录集中识别待处理任务。"""
         # 收集所有需要处理 step1 的任务
         pending_tasks = []
         for i, task in enumerate(self.tasks):

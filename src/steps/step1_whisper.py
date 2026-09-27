@@ -211,8 +211,8 @@ class WhisperWorker(QThread):
 class WhisperBatchWorker(QThread):
     """字幕提取批量工作线程。
 
-    一次性把所有任务的源文件传给 infer.exe，只加载一次模型。
-    完成后按文件名把字幕分配到各任务的 subtitle_dir。
+    按源目录分组，将选中任务的文件硬链接到临时输入目录供 infer.exe 扫描。
+    每组只加载一次模型；不支持硬链接时逐个识别选中任务。
 
     信号:
         log_signal: 日志
@@ -232,9 +232,14 @@ class WhisperBatchWorker(QThread):
         self._stop_flag = False
         self._process = None
         self._reported = {}  # task_id -> ok，用于去重，避免同一任务被重复上报
+        self._staging_dir = None
+        self._temp_output = None
+        self._single_worker = None
 
     def stop(self):
         self._stop_flag = True
+        if self._single_worker:
+            self._single_worker.stop()
         if self._process:
             try:
                 self._process.terminate()
@@ -262,6 +267,45 @@ class WhisperBatchWorker(QThread):
             for task in self.tasks:
                 self._report(task.task_id, False, str(e))
             self.finished_signal.emit(*self._finish_stats())
+        finally:
+            if self._process:
+                try:
+                    self._process.terminate()
+                    self._process.wait(timeout=5)
+                except Exception:
+                    pass
+                self._process = None
+            self._cleanup_staging()
+            if self._temp_output:
+                shutil.rmtree(self._temp_output, ignore_errors=True)
+                self._temp_output = None
+
+    def _cleanup_staging(self):
+        if self._staging_dir:
+            shutil.rmtree(self._staging_dir, ignore_errors=True)
+            self._staging_dir = None
+
+    def _finish_stopped(self):
+        self.log_signal.emit("[字幕批量] 已中止")
+        for task in self.tasks:
+            self._report(task.task_id, False, "用户中止")
+        self.finished_signal.emit(*self._finish_stats())
+
+    def _run_single_fallback(self, tasks):
+        """目录无法创建硬链接时，仅对选中任务逐个识别。"""
+        self.log_signal.emit("[字幕批量] 无法准备选中文件目录，逐个处理本组任务")
+        for task in tasks:
+            if self._stop_flag:
+                self._report(task.task_id, False, "用户中止")
+                continue
+            worker = WhisperWorker(task, self.config)
+            self._single_worker = worker
+            worker.log_signal.connect(self.log_signal.emit)
+            try:
+                worker.run()
+                self._report(task.task_id, *worker.result)
+            finally:
+                self._single_worker = None
 
     def _run_impl(self):
         whisper_dir = self.config.whisper_dir
@@ -276,14 +320,13 @@ class WhisperBatchWorker(QThread):
 
         # 创建临时输出目录
         tmp_output = tempfile.mkdtemp(prefix="whisper_batch_")
+        self._temp_output = tmp_output
         self.log_signal.emit(f"[字幕批量] 临时输出目录: {tmp_output}")
 
-        # 按输入文件夹分组。每个文件夹使用独立的输出子目录，避免不同文件夹下
-        # 同名文件（如都叫 01.mp4）的字幕在平铺目录里互相覆盖或误匹配。
+        # 按源文件所在目录分组；不同子目录可能有同名文件，必须隔离输出。
         groups = {}
         for t in self.tasks:
-            folder = (t.import_folder if t.from_folder and t.import_folder
-                      else os.path.dirname(t.source_path))
+            folder = os.path.dirname(t.source_path)
             groups.setdefault(folder, []).append(t)
 
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -296,7 +339,23 @@ class WhisperBatchWorker(QThread):
             out_dir = os.path.join(tmp_output, str(gi))
             os.makedirs(out_dir, exist_ok=True)
 
-            # 构建命令行（infer.exe 自动扫描输入文件夹中的音频）
+            # infer.exe 的目录参数会扫描整个目录。用同卷硬链接临时目录仅暴露
+            # 当前任务文件，避免识别预览中取消选择的音频和已有混音成品。
+            try:
+                self._staging_dir = tempfile.mkdtemp(prefix=".whisper-selected-", dir=folder)
+                for task in group_tasks:
+                    os.link(task.source_path, os.path.join(
+                        self._staging_dir, os.path.basename(task.source_path)
+                    ))
+            except OSError:
+                self._cleanup_staging()
+                self._run_single_fallback(group_tasks)
+                if self._stop_flag:
+                    self._finish_stopped()
+                    return
+                continue
+
+            # 构建命令行（infer.exe 只扫描临时目录中的选中音频）
             cmd = [
                 infer_exe,
                 "--output_dir", out_dir,
@@ -321,7 +380,7 @@ class WhisperBatchWorker(QThread):
                 ])
             else:
                 cmd.append("--no_merge_segments")
-            cmd.append(folder)
+            cmd.append(self._staging_dir)
 
             self.log_signal.emit(
                 f"[字幕批量] 启动({gi + 1}/{len(groups)}): {folder}, "
@@ -365,19 +424,17 @@ class WhisperBatchWorker(QThread):
 
             self._process.wait()
             ret = self._process.returncode
+            self._process = None
 
             if self._stop_flag:
-                self.log_signal.emit("[字幕批量] 已中止")
-                for task in group_tasks:
-                    self._report(task.task_id, False, "用户中止")
-                self.finished_signal.emit(*self._finish_stats())
-                shutil.rmtree(tmp_output, ignore_errors=True)
+                self._finish_stopped()
                 return
 
             if ret != 0:
                 self.log_signal.emit(f"[字幕批量] {folder} infer.exe 退出码: {ret}")
                 for task in group_tasks:
                     self._report(task.task_id, False, f"infer.exe 退出码: {ret}")
+                self._cleanup_staging()
                 continue
 
             # 在该组输出子目录内匹配字幕（组内文件名唯一，无跨文件夹冲突）
@@ -414,13 +471,12 @@ class WhisperBatchWorker(QThread):
                     self._report(task.task_id, False, f"移动文件失败: {e}")
 
             if self._stop_flag:
-                self.log_signal.emit("[字幕批量] 已中止")
-                self.finished_signal.emit(*self._finish_stats())
-                shutil.rmtree(tmp_output, ignore_errors=True)
+                self._finish_stopped()
                 return
+
+            self._cleanup_staging()
 
         s, f = self._finish_stats()
         self.progress_signal.emit(100)
         self.log_signal.emit(f"[字幕批量] 完成: 成功 {s}, 失败 {f}")
         self.finished_signal.emit(s, f)
-        shutil.rmtree(tmp_output, ignore_errors=True)

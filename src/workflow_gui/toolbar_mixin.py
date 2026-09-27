@@ -5,6 +5,8 @@ import os
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
 from ..task_manager import TaskQueue, STEP_DONE, STEP_RUNNING
+from ..folder_import import build_folder_import_plan, find_matching_subtitle
+from ..widgets.folder_import_dialog import FolderImportPreviewDialog
 from .common import VIDEO_EXTS, SUBTITLE_EXTS, MIX_AUDIO_EXTS
 
 
@@ -70,25 +72,36 @@ class ToolbarMixin:
             return
 
         folder_name = os.path.basename(folder) or folder
-        audio_files = TaskQueue.scan_folder_media(folder)
-
-        if not audio_files:
+        candidates = build_folder_import_plan(
+            folder, self.config.mixer_cfg,
+            (task.source_path for task in self.task_queue.tasks),
+            self.config.workspace_dir,
+        )
+        if not candidates:
             self._append_log(f"[文件夹] 未找到支持的媒体文件: {folder_name}")
+            return
+
+        dialog = FolderImportPreviewDialog(folder, candidates, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            self._append_log(f"[文件夹] 已取消导入: {folder_name}")
+            return
+        selected = dialog.selected_candidates()
+        if not selected:
             return
 
         # 创建文件夹任务组
         group = self.task_queue.create_group(folder)
         self._append_log(
-            f"[文件夹] 导入: {folder_name} (发现 {len(audio_files)} 个媒体文件)"
+            f"[文件夹] 导入: {folder_name} (发现 {len(candidates)} 个媒体文件，选择 {len(selected)} 个)"
         )
 
-        for path in audio_files:
-            sub_path = self._find_matching_subtitle(path)
-            task = self.task_queue.add_task(path, subtitle_path=sub_path,
+        for candidate in selected:
+            task = self.task_queue.add_task(candidate.source_path,
+                                            subtitle_path=candidate.subtitle_path,
                                             group_id=group.group_id)
             self._append_log(f"[任务] 添加: {task.source_name}")
-            if sub_path:
-                self._append_log(f"[任务]   ↳ 自动识别字幕: {os.path.basename(sub_path)}")
+            if candidate.subtitle_path:
+                self._append_log(f"[任务]   ↳ 自动识别字幕: {os.path.basename(candidate.subtitle_path)}")
 
         self._append_log(
             f"[文件夹] 完成: 文件夹组「{group.group_name}」共 {len(group.tasks)} 个任务"
@@ -102,40 +115,7 @@ class ToolbarMixin:
         2. 同名 + 任意后缀 + .lrc/.vtt/.srt（如 "视频A.zh-CN.lrc"）
         找到返回路径，否则返回空字符串。
         """
-        directory = os.path.dirname(media_path)
-        stem = os.path.splitext(os.path.basename(media_path))[0]
-        if not directory:
-            directory = "."
-        if not os.path.isdir(directory):
-            return ""
-
-        # 尝试的字幕扩展名（按优先级）
-        sub_exts = [".lrc", ".srt", ".vtt"]
-
-        try:
-            files_in_dir = os.listdir(directory)
-        except OSError:
-            return ""
-
-        # 1. 精确匹配：{stem}.{ext}
-        for ext in sub_exts:
-            target = f"{stem}{ext}"
-            if target.lower() in (f.lower() for f in files_in_dir):
-                # 找到实际文件名（保留大小写）
-                for f in files_in_dir:
-                    if f.lower() == target.lower():
-                        return os.path.join(directory, f)
-
-        # 2. 模糊匹配：{stem}.*.{ext}（如 "视频A.zh-CN.lrc"）
-        for f in files_in_dir:
-            f_lower = f.lower()
-            if not f_lower.startswith(stem.lower() + "."):
-                continue
-            for ext in sub_exts:
-                if f_lower.endswith(ext):
-                    return os.path.join(directory, f)
-
-        return ""
+        return find_matching_subtitle(media_path)
 
     def on_files_dropped(self, files):
         """拖拽或选择文件后调用，根据文件类型分发。"""
