@@ -37,6 +37,7 @@ WHISPER_MEDIA_SUFFIXES = (
 
 # 默认配置
 DEFAULT_CONFIG = {
+    "setup_completed": False,
     "subprojects": {
         "whisper_dir": "",
     },
@@ -167,8 +168,11 @@ class WorkflowConfig:
 
     def is_configured(self) -> bool:
         """检查字幕提取项目路径是否已正确配置。"""
-        sp = self.config.get("subprojects", {})
-        return bool(sp.get("whisper_dir", "")) and os.path.isdir(sp["whisper_dir"])
+        return self._validate_subproject("whisper_dir", self.whisper_dir)
+
+    def needs_setup(self) -> bool:
+        """保留旧配置兼容性；用户主动跳过后不再重复弹出引导。"""
+        return not self.config.get("setup_completed", False) and not self.is_configured()
 
     @staticmethod
     def _validate_subproject(key: str, path: str) -> bool:
@@ -177,7 +181,7 @@ class WorkflowConfig:
         checks = {
             "whisper_dir": ["infer.exe"],
         }
-        return all(os.path.exists(os.path.join(path, f)) for f in checks.get(key, []))
+        return all(os.path.isfile(os.path.join(path, f)) for f in checks.get(key, []))
 
     # 便捷访问
     @property
@@ -192,7 +196,7 @@ class WorkflowConfig:
     def mixer_cfg(self): return self.config["mixer"]
 
     def run_setup_dialog(self, app) -> bool:
-        """首次启动引导对话框，返回是否完成配置。"""
+        """首次启动引导对话框，保存或主动跳过均可进入主界面。"""
         dialog = SetupDialog(self)
         return dialog.exec() == QDialog.DialogCode.Accepted
 
@@ -211,7 +215,7 @@ class SetupDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        hint = QLabel("请指定字幕提取项目的路径。程序会自动验证路径有效性。")
+        hint = QLabel("请指定字幕提取项目的路径，也可以跳过，稍后通过工具栏的“配置”补充。")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -245,6 +249,16 @@ class SetupDialog(QDialog):
         self._status_label = QLabel("")
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
+
+        skip_hint = QLabel(
+            "跳过后字幕提取及完整自动流水线不可用，需要自行准备字幕。"
+            "可通过“+ 添加字幕”关联，或将同名字幕放在音频旁，再生成语音和混音。"
+        )
+        skip_hint.setWordWrap(True)
+        layout.addWidget(skip_hint)
+        self.skip_btn = QPushButton("跳过字幕提取，进入主界面")
+        self.skip_btn.clicked.connect(self._on_skip)
+        layout.addWidget(self.skip_btn)
 
     def _add_path_row(self, parent_layout, label_text, key, is_file=False) -> QLineEdit:
         row = QHBoxLayout()
@@ -293,9 +307,22 @@ class SetupDialog(QDialog):
         if not self._verify_all():
             QMessageBox.warning(self, "提示", "请先通过路径验证。")
             return
-        self.config.config["subprojects"]["whisper_dir"] = self.whisper_edit.text().strip()
-        ws_dir = self.workspace_edit.text().strip()
-        self.config.config["workspace_dir"] = ws_dir
-        os.makedirs(ws_dir, exist_ok=True)
-        self.config.save()
+        self._save_settings(self.whisper_edit.text().strip())
+
+    def _on_skip(self):
+        self._save_settings("")
+
+    def _save_settings(self, whisper_dir):
+        ws_dir = self.workspace_edit.text().strip() or self.config.workspace_dir
+        previous = copy.deepcopy(self.config.config)
+        try:
+            os.makedirs(ws_dir, exist_ok=True)
+            self.config.config["subprojects"]["whisper_dir"] = whisper_dir
+            self.config.config["workspace_dir"] = ws_dir
+            self.config.config["setup_completed"] = True
+            self.config.save()
+        except OSError as error:
+            self.config.config = previous
+            QMessageBox.warning(self, "保存失败", f"无法创建工作区或保存配置：\n{error}")
+            return
         self.accept()

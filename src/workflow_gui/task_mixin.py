@@ -182,6 +182,8 @@ class TaskMixin:
         if self._workers.get(step):
             QMessageBox.warning(self, "提示", f"步骤 {step} 正在运行中。")
             return
+        if step == 1 and not self._check_whisper_available():
+            return
         # 切换到该任务
         self.task_queue.set_current(task_id)
         # 重置该步状态（取消 skipped/done/failed）

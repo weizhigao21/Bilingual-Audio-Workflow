@@ -131,7 +131,7 @@ class FolderTreeTests(unittest.TestCase):
     def test_group_subtitles_use_batch_mode(self):
         config = SimpleNamespace(workspace_dir=str(self.root / "batch-workspace"),
                                  tts_cfg={}, whisper_cfg={"enable_batching": False},
-                                 mixer_cfg={})
+                                 mixer_cfg={}, is_configured=lambda: True)
         window = WorkflowMainWindow(config)
         self.addCleanup(window.close)
         group = window.task_queue.create_group(str(self.media_root))

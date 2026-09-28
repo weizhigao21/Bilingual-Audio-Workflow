@@ -32,11 +32,26 @@ class BatchMixin:
         dlg_layout = QVBoxLayout(dialog)
         dlg_layout.addWidget(QLabel(f"将对 {len(self.task_queue.tasks)} 个任务批量执行以下步骤："))
 
+        whisper_available = self.config.is_configured()
+        if not whisper_available:
+            notice = QLabel(
+                "未配置有效的字幕提取程序路径，字幕提取及完整自动流水线不可用。\n"
+                "需要自行准备字幕：通过“+ 添加字幕”关联，或导入时使用音频旁的同名字幕。"
+                "已有字幕的任务仍可使用语音→混音流水线。"
+            )
+            notice.setWordWrap(True)
+            notice.setStyleSheet("color: #b36b00;")
+            dlg_layout.addWidget(notice)
+
         step_names = {1: "步骤1: 字幕提取", 2: "步骤2: 语音生成", 3: "步骤3: 音频混音"}
         checks = {}
         for step in (1, 2, 3):
             cb = QCheckBox(step_names[step])
             cb.setChecked(True)
+            if step == 1 and not whisper_available:
+                cb.setChecked(False)
+                cb.setEnabled(False)
+                cb.setToolTip("请通过工具栏的“配置”设置含 infer.exe 的字幕提取程序目录。")
             dlg_layout.addWidget(cb)
             checks[step] = cb
 
@@ -45,7 +60,10 @@ class BatchMixin:
         order_layout = QHBoxLayout(order_group)
         order_layout.addWidget(QLabel("模式:"))
         order_combo = QComboBox()
-        order_combo.addItem("流水线：字幕就绪即语音→混音（推荐）", "pipeline")
+        order_combo.addItem(
+            "流水线：字幕就绪即语音→混音（推荐）" if whisper_available
+            else "流水线：已有字幕→语音→混音", "pipeline"
+        )
         order_combo.addItem("按步骤：先全部字幕→再全部语音→再全部混音", "by_step")
         order_combo.addItem("按任务：每个任务跑完三步再跑下一个", "by_task")
         order_layout.addWidget(order_combo, 1)
@@ -69,6 +87,11 @@ class BatchMixin:
         steps = [s for s in (1, 2, 3) if checks[s].isChecked()]
         if not steps:
             QMessageBox.warning(self, "提示", "请至少选择一个步骤。")
+            return
+
+        if 1 in steps and not self._check_whisper_available():
+            return
+        if not self._check_subtitles_available(self.task_queue.tasks, steps):
             return
 
         order = order_combo.currentData()

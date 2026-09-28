@@ -50,8 +50,8 @@ def main():
     app.setApplicationVersion(VERSION)
 
     config = WorkflowConfig()
-    if not config.is_configured():
-        # 首次启动：引导用户配置三个子项目路径
+    if config.needs_setup():
+        # 首次启动：可配置字幕提取路径，也可主动跳过。
         if not config.run_setup_dialog(app):
             print("未完成配置，程序退出。")
             sys.exit(0)

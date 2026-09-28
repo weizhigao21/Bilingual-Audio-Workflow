@@ -13,6 +13,37 @@ from ..task_manager import (
 class StepMixin:
     """步骤执行相关方法。"""
 
+    def _check_whisper_available(self):
+        if self.config.is_configured():
+            return True
+        QMessageBox.warning(
+            self, "字幕提取不可用",
+            "未配置有效的字幕提取程序路径（目录中需包含 infer.exe），"
+            "字幕提取及完整自动流水线不可用。\n\n"
+            "请通过工具栏的“配置”补充路径，或自行准备字幕，通过“+ 添加字幕”关联，"
+            "再执行语音生成和混音。"
+        )
+        return False
+
+    def _check_subtitles_available(self, tasks, steps):
+        """未部署识别程序时，在执行前提示需要自行准备字幕的任务。"""
+        if 2 not in steps or self.config.is_configured():
+            return True
+        missing = [task.source_name for task in tasks
+                   if task.step_status(2) not in (STEP_DONE, STEP_SKIPPED)
+                   and (not task.is_step_ready(2) or not os.path.isfile(task.step1_output))]
+        if not missing:
+            return True
+        names = "\n".join(missing[:10])
+        if len(missing) > 10:
+            names += f"\n……共 {len(missing)} 个任务"
+        QMessageBox.warning(
+            self, "需要自行准备字幕",
+            "未配置有效的字幕提取程序路径，无法自动提取字幕。\n"
+            "请为以下任务准备字幕，并通过“+ 添加字幕”关联后再执行：\n\n" + names
+        )
+        return False
+
     # ========== 步骤执行 ==========
     def _on_start_step(self, step: int):
         # 组模式：对组内所有任务逐个执行该步骤
@@ -29,6 +60,10 @@ class StepMixin:
         task = self.task_queue.current
         if not task:
             QMessageBox.warning(self, "提示", "请先选择一个任务。")
+            return
+        if step == 1 and not self._check_whisper_available():
+            return
+        if not self._check_subtitles_available([task], [step]):
             return
         if not os.path.exists(task.source_path):
             QMessageBox.warning(
@@ -92,6 +127,10 @@ class StepMixin:
             return
         if not group.tasks:
             QMessageBox.information(self, "提示", "该文件夹组没有任务。")
+            return
+        if step == 1 and not self._check_whisper_available():
+            return
+        if not self._check_subtitles_available(group.tasks, [step]):
             return
         pending = [t for t in group.tasks
                    if t.step_status(step) not in (STEP_DONE, STEP_SKIPPED)]
