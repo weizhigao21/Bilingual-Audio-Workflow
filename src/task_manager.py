@@ -34,6 +34,11 @@ STEP_DONE = "done"
 STEP_FAILED = "failed"
 STEP_SKIPPED = "skipped"
 
+# 源文件夹被重命名时需要同步改写的路径字段（rename_mixin 复用同一份定义）
+TASK_PATH_FIELDS = ("source_path", "import_folder", "custom_subtitle",
+                    "custom_mix_folder", "step1_output", "step2_output",
+                    "step3_output")
+
 
 def generated_import_reason(root: str, source_path: str, custom_output: str = "") -> str:
     """指出目录扫描中疑似混音成品的原因；显式选择根目录本身不受目录规则影响。"""
@@ -63,6 +68,25 @@ def generated_import_reason(root: str, source_path: str, custom_output: str = ""
     if os.path.splitext(os.path.basename(source_path))[0].endswith("_mixed"):
         return "文件名以 _mixed 结尾"
     return ""
+
+
+def _normalize_task_paths(data: dict) -> bool:
+    """把历史记录里 "E:\\...\\album\\." 这类冗余路径归一为 "E:\\...\\album"。
+
+    旧版重命名逻辑会把与被重命名文件夹自身相等的字段（import_folder 等）
+    写成 "新目录\\."，其 basename 是 "."，会让"已带双语-前缀则跳过"的判断失真，
+    导致每次批量都重新把已重命名的文件夹当重命名对象（重复命名 + 反复重试失败）。
+    这里在恢复时一次性修复并落盘。返回是否发生修改。
+    """
+    changed = False
+    for key in TASK_PATH_FIELDS:
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            fixed = os.path.normpath(value)
+            if fixed != value:
+                data[key] = fixed
+                changed = True
+    return changed
 
 
 @dataclass
@@ -429,8 +453,9 @@ class TaskQueue(QObject):
                     raise ValueError("任务记录字段无效或 ID 重复")
                 data = {key: value for key, value in data.items() if key in names}
                 data["workspace_root"] = self.workspace_root
+                repaired = _normalize_task_paths(data)
                 task = TaskInfo(**data)
-                if self._reconcile_restored_task(task):
+                if self._reconcile_restored_task(task) or repaired:
                     task.save()
                 restored.append(task)
                 existing.add(task.task_id)
