@@ -1,4 +1,4 @@
-# 双语音声工作流 v2.1.16
+# 双语音声工作流 v2.1.17
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
@@ -186,6 +186,11 @@ TTS 合成结果按 **文本、声音/模型、生成设置及 API 来源** 区�
 可通过 **TTS 配置 → 清除缓存** 按钮一键清理，或手动删除 `resources/tts_audio_cache/` 目录和 `resources/configs/tts_audio_cache.db`。
 
 ## 变更记录
+
+### v2.1.17 (2026-09-28)
+- 微软免费 Edge TTS 声音列表修正为经服务列表与合成验证的 6 个普通话声音：晓晓、云希、晓艺、云健、云夏、云扬；移除晓辰等 13 个免费服务未提供的旧选项
+- 旧配置中的无效声音明确标记为不可用，生成前直接提示重新选择，不再整批重复请求；不再将旧声音误显示为第一个选项
+- 无音频错误显示实际请求的声音名称，便于区分声音不可用与服务临时异常
 
 ### v2.1.16 (2026-09-28)
 - 字幕批量识别逐份确认完整输出，及时刷新左侧文件树的字幕状态，不再等待 infer.exe 整批退出

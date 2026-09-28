@@ -49,6 +49,10 @@ class TTSConfigPanel(QGroupBox):
             self.voice_combo.addItem(f"{name} - {vid}", vid)
         self.voice_combo.currentIndexChanged.connect(self._save)
         edge_layout.addWidget(self.voice_combo, 0, 1)
+        self.voice_hint = QLabel()
+        self.voice_hint.setWordWrap(True)
+        self.voice_hint.setStyleSheet("color: #666; font-size: 11px;")
+        edge_layout.addWidget(self.voice_hint, 6, 0, 1, 2)
 
         edge_layout.addWidget(QLabel("语速:"), 1, 0)
         self.rate_combo = QComboBox()
@@ -168,8 +172,10 @@ class TTSConfigPanel(QGroupBox):
             # edge 参数
             voice = cfg.get("edge_voice", "zh-CN-XiaoxiaoNeural")
             idx = self.voice_combo.findData(voice)
-            if idx >= 0:
-                self.voice_combo.setCurrentIndex(idx)
+            if idx < 0:
+                self.voice_combo.addItem(f"不可用（请重新选择） - {voice}", voice)
+                idx = self.voice_combo.count() - 1
+            self.voice_combo.setCurrentIndex(idx)
             self.rate_combo.setCurrentText(cfg.get("edge_rate", "+0%"))
             self.volume_combo.setCurrentText(cfg.get("edge_volume", "+0%"))
             self.threads_spin.setValue(cfg.get("edge_threads", 5))
@@ -187,6 +193,13 @@ class TTSConfigPanel(QGroupBox):
             for w in widgets:
                 w.blockSignals(False)
         self._refresh_cache_info()
+        self._update_voice_hint()
+
+    def _update_voice_hint(self):
+        if self.voice_combo.currentData() in EDGE_TTS_VOICES:
+            self.voice_hint.setText("免费 Edge TTS 支持上列 6 个普通话声音，Azure 声音不能直接用于此模式。")
+        else:
+            self.voice_hint.setText("保存的声音不在免费 Edge TTS 可用列表中，请重新选择声音后生成。")
 
     def _refresh_api_combo(self):
         cfg = self.config.tts_cfg
@@ -246,6 +259,7 @@ class TTSConfigPanel(QGroupBox):
         cfg = self.config.tts_cfg
         cfg["tts_mode"] = self.mode_combo.currentData()
         cfg["edge_voice"] = self.voice_combo.currentData()
+        self._update_voice_hint()
         cfg["edge_rate"] = self.rate_combo.currentText()
         cfg["edge_volume"] = self.volume_combo.currentText()
         cfg["edge_threads"] = self.threads_spin.value()

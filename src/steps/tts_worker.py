@@ -10,6 +10,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from .tts_cache import AudioCache
 from .tts_logger import logger
 from .tts_profile import profile_matches, save_profile
+from .edge_voices import EDGE_TTS_VOICES
 from .tts_utils import (
     set_sleep_mode,
     generate_filename,
@@ -372,6 +373,12 @@ class TTSWorker(QThread):
         import concurrent.futures
 
         voice = self.config.get("edge_voice", "zh-CN-XiaoxiaoNeural")
+        if voice not in EDGE_TTS_VOICES:
+            self.log_signal.emit(
+                f"免费 Edge TTS 不支持声音 {voice}，请在 TTS 配置中重新选择声音；未发送片段请求"
+            )
+            self._finish_generation(False, task_dir)
+            return
         rate = self.config.get("edge_rate", "+0%")
         volume = self.config.get("edge_volume", "+0%")
 

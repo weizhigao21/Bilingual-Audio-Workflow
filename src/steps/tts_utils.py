@@ -370,6 +370,11 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
                 logger.warning(f"Edge TTS超时 (尝试 {attempt}/{max_retries}): {file_name}")
                 # 超时取消时 save() 可能已创建部分文件，清理后重试
                 _safe_unlink(temp_path)
+            except edge_tts.exceptions.NoAudioReceived:
+                last_error = (f"微软声音 {voice} 未返回音频（NoAudioReceived），"
+                              "请确认声音可用；可降低并发后重试")
+                logger.warning(f"Edge TTS无音频 (尝试 {attempt}/{max_retries}): {file_name} - {last_error}")
+                _safe_unlink(temp_path)
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {e}")
