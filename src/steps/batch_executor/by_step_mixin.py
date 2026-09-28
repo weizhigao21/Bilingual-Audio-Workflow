@@ -99,7 +99,7 @@ class ByStepMixin:
 
         return success, fail, skipped
 
-    def _run_whisper_batch(self, total: int, failed_tasks: set):
+    def _run_whisper_batch(self, total: int, failed_tasks: set, on_task_ready=None):
         """步骤1批量处理：按导入根目录集中识别待处理任务。"""
         if self._stop_flag:
             return
@@ -155,6 +155,8 @@ class ByStepMixin:
                     failed_tasks.add(task_id)
                     self.log_signal.emit(f"[批量] [{task_obj.source_name}] 字幕失败: {msg}")
                 self.task_finished.emit(task_id, ok)
+                if ok and on_task_ready is not None:
+                    on_task_ready(task_obj)
 
         def on_finished(success_count, fail_count):
             loop.quit()

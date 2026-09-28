@@ -1,24 +1,15 @@
 # -*- coding: utf-8 -*-
-"""批量执行器 Mixin：流水线模式（字幕串行 + 语音/混音交错并行）。"""
+"""流水线：字幕集中识别，逐份派发语音和混音。"""
 import queue
 import threading
 
-from ...task_manager import STEP_DONE, STEP_SKIPPED
+from ...task_manager import STEP_DONE, STEP_SKIPPED, STEP_FAILED
 
 
 class PipelineMixin:
-    """流水线模式：字幕先全部完成，然后语音与混音交错并行。"""
+    """infer.exe 持续识别，字幕就绪的任务立即进入后续队列。"""
 
     def _run_pipeline(self, total: int):
-        """流水线模式：字幕先全部完成，然后语音与混音交错并行。
-
-        调度策略：
-          1. 字幕（步骤1）按导入文件夹集中完成，失败的进入 failed 集合
-          2. 语音生成（步骤2）：tts_workers 个线程并行处理就绪任务，
-             每个任务完成后立即放入混音队列
-          3. 混音（步骤3）：mix_workers 个线程（默认1）从混音队列取任务，
-             一有空闲就继续混音——实现"混音完成又有语音完成就继续混音"
-        """
         failed = set()
         failed_lock = threading.Lock()
 
@@ -30,209 +21,193 @@ class PipelineMixin:
             with failed_lock:
                 return task_id in failed
 
-        # ---------- 阶段1：字幕（只跑步骤1） ----------
-        if 1 in self.steps:
-            self.log_signal.emit(f"\n[流水线] ==== 阶段1 字幕提取: 共 {total} 个任务 ====")
-            self._run_whisper_batch(total, failed)
-            self.log_signal.emit("[流水线] 阶段1 字幕提取完成")
-
-        # ---------- 阶段2：语音 + 混音流水线 ----------
-        if 2 not in self.steps and 3 not in self.steps:
-            # 只跑了字幕
-            pass
-        else:
-            # 任务级语音并行 = 同时生成语音的"音频数"（独立配置，默认 2），
-            # 与片段级并发（Edge 全局共享线程池/并发上限）分开，
-            # 避免多个音频同时全速生成导致日志混杂、触发 Edge 限流
-            tts_workers = max(
-                1, int(self.config.tts_cfg.get("pipeline_tts_workers", 2))
-            )
-            tts_workers = min(tts_workers, max(1, len(self.tasks))) if 2 in self.steps else 0
-            # 混音并行度直接使用混音配置的"线程数"(thread_count)，
-            # 让用户在混音配置面板的调整真正生效（多任务同时混音）
-            mix_workers = max(1, int(self.config.mixer_cfg.get("thread_count", 4)))
-            # 不超过任务数，避免空转线程
-            mix_workers = min(mix_workers, max(1, len(self.tasks))) if 3 in self.steps else 0
-            self.log_signal.emit(
-                f"\n[流水线] ==== 阶段2 语音+混音交错: "
-                f"语音并行(音频) {tts_workers}, 混音并行 {mix_workers} ===="
-            )
-
-            tts_queue = queue.Queue()
-            mix_queue = queue.Queue()
-
-            # 各任务内进度独立累计，再折算为整批进度，允许并发且不回退。
-            progress_lock = threading.Lock()
-            total_tts_tasks = 0
-            total_mix_tasks = 0
-            tts_progress = {}
-            mix_progress = {}
-            active_mix_names = {}
-
-            # 只放需要处理的步骤（跳过已完成/已失败的任务）
+        def counts():
+            success = fail = skipped = 0
             for task in self.tasks:
                 if is_failed(task.task_id):
-                    continue
-                # 源文件检查：不存在且无法自动修复 → 跳过任务（语音/混音都依赖源文件）
-                if not self._resolve_source_path(task):
-                    self.log_signal.emit(f"[流水线] [{task.source_name}] 源文件不存在，跳过任务")
-                    mark_failed(task.task_id)
-                    self.task_finished.emit(task.task_id, False)
-                    continue
-                if 2 in self.steps and task.step_status(2) not in (STEP_DONE, STEP_SKIPPED):
-                    total_tts_tasks += 1
-                    tts_queue.put(task)
-                elif 3 in self.steps and task.step_status(3) not in (STEP_DONE, STEP_SKIPPED):
-                    # 语音已就绪（步骤2 不在执行范围或已完成），直接混音
-                    total_mix_tasks += 1
-                    mix_queue.put(task)
-            # 语音任务完成后都会流入混音队列，补上这部分混音总数
-            if 3 in self.steps:
-                total_mix_tasks += total_tts_tasks
-
-            def update_step_progress(step, task_id, value):
-                """并发任务各自累计，避免较慢任务把进度条拉回。"""
-                with progress_lock:
-                    values = tts_progress if step == 2 else mix_progress
-                    values[task_id] = max(values.get(task_id, 0), min(100, max(0, value)))
-                    total_tasks = total_tts_tasks if step == 2 else total_mix_tasks
-                    overall = int(sum(values.values()) / max(1, total_tasks))
-                    self.step_progress_signal.emit(step, overall)
-
-            def update_mix_status(task, active):
-                with progress_lock:
-                    if active:
-                        active_mix_names[task.task_id] = task.source_name[:4]
-                    else:
-                        active_mix_names.pop(task.task_id, None)
-                    names = '，'.join(active_mix_names.values())
-                    self.step_status_signal.emit(
-                        3, f"当前任务：{names}" if names else ""
-                    )
-
-            tts_done_event = threading.Event()
-
-            def tts_worker_fn():
-                try:
-                    while not self._stop_flag:
-                        try:
-                            task = tts_queue.get(timeout=0.2)
-                        except queue.Empty:
-                            break
-                        if self._stop_flag:
-                            tts_queue.task_done()
-                            break
-                        self.task_started.emit(task.task_id)
-                        self.log_signal.emit(
-                            f"[流水线] [{task.source_name}] 开始语音生成"
-                        )
-                        ok, msg = self._run_single_step_sync(
-                            task, 2, progress_callback=lambda value, task_id=task.task_id:
-                            update_step_progress(2, task_id, value)
-                        )
-                        # 语音完成立即通知刷新任务列表（显示语音进度）
-                        self.task_finished.emit(task.task_id, ok)
-                        if ok:
-                            self.log_signal.emit(
-                                f"[流水线] [{task.source_name}] 语音完成 → 待混音"
-                            )
-                            if 3 in self.steps and task.step_status(3) not in (STEP_DONE, STEP_SKIPPED):
-                                mix_queue.put(task)
-                        else:
-                            self.log_signal.emit(
-                                f"[流水线] [{task.source_name}] 语音失败: {msg}"
-                            )
-                            mark_failed(task.task_id)
-                        # 语音进度按任务累计推进
-                        update_step_progress(2, task.task_id, 100)
-                        tts_queue.task_done()
-                finally:
-                    pass
-
-            def mix_worker_fn():
-                try:
-                    while not self._stop_flag:
-                        try:
-                            task = mix_queue.get(timeout=0.2)
-                        except queue.Empty:
-                            # 语音全部完成且队列空 → 结束
-                            if tts_queue.empty() and tts_done_event.is_set():
-                                break
-                            continue
-                        if self._stop_flag:
-                            mix_queue.task_done()
-                            break
-                        if is_failed(task.task_id):
-                            # 语音阶段已失败的任务不再混音，明确打日志避免"静默跳过"
-                            self.log_signal.emit(
-                                f"[流水线] [{task.source_name}] 语音阶段失败，跳过混音"
-                            )
-                            mix_queue.task_done()
-                            continue
-                        self.task_started.emit(task.task_id)
-                        self.log_signal.emit(
-                            f"[流水线] [{task.source_name}] 开始混音"
-                        )
-                        update_mix_status(task, True)
-                        try:
-                            ok, msg = self._run_single_step_sync(
-                                task, 3, progress_callback=lambda value, task_id=task.task_id:
-                                update_step_progress(3, task_id, value)
-                            )
-                        finally:
-                            update_mix_status(task, False)
-                        if ok:
-                            self.log_signal.emit(f"[流水线] [{task.source_name}] 混音完成")
-                        else:
-                            self.log_signal.emit(f"[流水线] [{task.source_name}] 混音失败: {msg}")
-                            mark_failed(task.task_id)
-                        self.task_finished.emit(task.task_id, ok)
-                        # 混音进度按任务累计推进
-                        update_step_progress(3, task.task_id, 100)
-                        mix_queue.task_done()
-                finally:
-                    pass
-
-            tts_threads = []
-            for _ in range(tts_workers):
-                t = threading.Thread(target=tts_worker_fn, daemon=True)
-                t.start()
-                tts_threads.append(t)
-            mix_threads = []
-            for _ in range(mix_workers):
-                t = threading.Thread(target=mix_worker_fn, daemon=True)
-                t.start()
-                mix_threads.append(t)
-
-            # 先等所有语音线程结束（队列取空自然退出，或 stop 置位退出），
-            # 再通知混音线程"不再有新任务"，等其处理完剩余队列
-            for t in tts_threads:
-                t.join()
-            tts_done_event.set()
-            for t in mix_threads:
-                t.join()
-            self.log_signal.emit("[流水线] 语音与混音全部完成")
-
-            # 语音/混音进度条收尾
-            if 2 in self.steps:
-                self.step_progress_signal.emit(2, 100)
-            if 3 in self.steps:
-                self.step_progress_signal.emit(3, 100)
-
-        # ---------- 统计 ----------
-        success = 0
-        fail = 0
-        skipped = 0
-        for task in self.tasks:
-            if is_failed(task.task_id):
-                fail += 1
-            else:
-                all_done = all(
-                    task.step_status(s) in (STEP_DONE, STEP_SKIPPED)
-                    for s in self.steps
-                )
-                if all_done:
+                    fail += 1
+                elif all(task.step_status(step) in (STEP_DONE, STEP_SKIPPED)
+                         for step in self.steps):
                     success += 1
                 else:
                     skipped += 1
-        return success, fail, skipped
+            return success, fail, skipped
+
+        if 2 not in self.steps and 3 not in self.steps:
+            if 1 in self.steps:
+                self._run_whisper_batch(total, failed)
+            return counts()
+
+        eligible = []
+        for task in self.tasks:
+            if self._resolve_source_path(task):
+                eligible.append(task)
+            else:
+                mark_failed(task.task_id)
+                self.task_finished.emit(task.task_id, False)
+        eligible_ids = {task.task_id for task in eligible}
+
+        needs_tts = {task.task_id for task in eligible if 2 in self.steps
+                     and task.step_status(2) not in (STEP_DONE, STEP_SKIPPED)}
+        needs_mix = {task.task_id for task in eligible if 3 in self.steps
+                     and task.step_status(3) not in (STEP_DONE, STEP_SKIPPED)}
+        tts_workers = min(max(1, int(self.config.tts_cfg.get("pipeline_tts_workers", 2))),
+                          len(needs_tts))
+        mix_workers = min(max(1, int(self.config.mixer_cfg.get("thread_count", 4))),
+                          len(needs_mix))
+        self.log_signal.emit(
+            f"\n[流水线] 字幕就绪即派发：语音并行(音频) {tts_workers}, 混音并行 {mix_workers}"
+        )
+
+        tts_queue = queue.Queue()
+        mix_queue = queue.Queue()
+        producer_done = threading.Event()
+        tts_done = threading.Event()
+        routed_tasks = set()
+        progress_lock = threading.Lock()
+        tts_progress = {}
+        mix_progress = {}
+        active_mix_names = {}
+
+        def update_progress(step, task_id, value):
+            with progress_lock:
+                values = tts_progress if step == 2 else mix_progress
+                total_tasks = len(needs_tts) if step == 2 else len(needs_mix)
+                values[task_id] = max(values.get(task_id, 0), min(100, max(0, value)))
+                self.step_progress_signal.emit(
+                    step, int(sum(values.values()) / max(1, total_tasks))
+                )
+
+        def update_mix_status(task, active):
+            with progress_lock:
+                if active:
+                    active_mix_names[task.task_id] = task.source_name[:4]
+                else:
+                    active_mix_names.pop(task.task_id, None)
+                names = '，'.join(active_mix_names.values())
+                self.step_status_signal.emit(3, f"当前任务：{names}" if names else "")
+
+        def fail_task(task, step, message):
+            task.set_step_status(step, STEP_FAILED)
+            task.set_step_error(step, message)
+            mark_failed(task.task_id)
+            self.log_signal.emit(f"[流水线] [{task.source_name}] 步骤{step} 失败: {message}")
+            self.task_finished.emit(task.task_id, False)
+
+        def dispatch_ready(task):
+            # 此回调在字幕批量执行器的事件循环中调用；重复确认不会重复排队。
+            if (self._stop_flag or task.task_id not in eligible_ids
+                    or is_failed(task.task_id) or task.task_id in routed_tasks):
+                return
+            if 1 in self.steps and task.step_status(1) not in (STEP_DONE, STEP_SKIPPED):
+                return
+            routed_tasks.add(task.task_id)
+            if task.task_id in needs_tts:
+                if task.is_step_ready(2):
+                    tts_queue.put(task)
+                else:
+                    fail_task(task, 2, "字幕尚未就绪")
+            elif task.task_id in needs_mix:
+                if task.is_step_ready(3):
+                    mix_queue.put(task)
+                else:
+                    fail_task(task, 3, "配音尚未就绪")
+
+        def execute(task, step):
+            try:
+                return self._run_single_step_sync(
+                    task, step, progress_callback=lambda value:
+                    update_progress(step, task.task_id, value)
+                )
+            except Exception as exc:
+                task.set_step_status(step, STEP_FAILED)
+                task.set_step_error(step, str(exc))
+                return False, str(exc)
+
+        def tts_worker_fn():
+            while not self._stop_flag:
+                try:
+                    task = tts_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if producer_done.is_set() and tts_queue.empty():
+                        break
+                    continue
+                try:
+                    if self._stop_flag:
+                        break
+                    self.task_started.emit(task.task_id)
+                    self.log_signal.emit(f"[流水线] [{task.source_name}] 开始语音生成")
+                    ok, msg = execute(task, 2)
+                    self.task_finished.emit(task.task_id, ok)
+                    if ok:
+                        self.log_signal.emit(f"[流水线] [{task.source_name}] 语音完成")
+                        if task.task_id in needs_mix:
+                            mix_queue.put(task)
+                    else:
+                        mark_failed(task.task_id)
+                        self.log_signal.emit(f"[流水线] [{task.source_name}] 语音失败: {msg}")
+                    update_progress(2, task.task_id, 100)
+                finally:
+                    tts_queue.task_done()
+
+        def mix_worker_fn():
+            while not self._stop_flag:
+                try:
+                    task = mix_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if producer_done.is_set() and tts_done.is_set() and mix_queue.empty():
+                        break
+                    continue
+                try:
+                    if self._stop_flag:
+                        break
+                    if is_failed(task.task_id):
+                        continue
+                    self.task_started.emit(task.task_id)
+                    self.log_signal.emit(f"[流水线] [{task.source_name}] 开始混音")
+                    update_mix_status(task, True)
+                    try:
+                        ok, msg = execute(task, 3)
+                    finally:
+                        update_mix_status(task, False)
+                    self.task_finished.emit(task.task_id, ok)
+                    if ok:
+                        self.log_signal.emit(f"[流水线] [{task.source_name}] 混音完成")
+                    else:
+                        mark_failed(task.task_id)
+                        self.log_signal.emit(f"[流水线] [{task.source_name}] 混音失败: {msg}")
+                    update_progress(3, task.task_id, 100)
+                finally:
+                    mix_queue.task_done()
+
+        # 消费线程必须先启动，并等到字幕生产者结束才退出空队列。
+        tts_threads = [threading.Thread(target=tts_worker_fn, daemon=True)
+                       for _ in range(tts_workers)]
+        mix_threads = [threading.Thread(target=mix_worker_fn, daemon=True)
+                       for _ in range(mix_workers)]
+        for thread in tts_threads + mix_threads:
+            thread.start()
+        try:
+            # 已有字幕/配音的任务直接进入后续队列。
+            for task in eligible:
+                dispatch_ready(task)
+            if 1 in self.steps and not self._stop_flag:
+                self.log_signal.emit(f"[流水线] 字幕集中识别: 共 {total} 个任务")
+                self._run_whisper_batch(total, failed, on_task_ready=dispatch_ready)
+                self.log_signal.emit("[流水线] 字幕识别结束")
+            for task in eligible:
+                dispatch_ready(task)
+        finally:
+            producer_done.set()
+            for thread in tts_threads:
+                thread.join()
+            tts_done.set()
+            for thread in mix_threads:
+                thread.join()
+
+        if not self._stop_flag:
+            for step in (2, 3):
+                if step in self.steps:
+                    self.step_progress_signal.emit(step, 100)
+            self.log_signal.emit("[流水线] 字幕、语音与混音处理结束")
+        return counts()

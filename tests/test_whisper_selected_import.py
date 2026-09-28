@@ -111,6 +111,46 @@ class WhisperSelectedImportTests(unittest.TestCase):
             self.assertTrue((root / "A/01.lrc").exists())
             self.assertTrue((root / "B/02.lrc").exists())
 
+    def test_completed_subtitle_is_reported_while_next_audio_is_recognized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'infer.exe').write_bytes(b'test')
+            paths = [root / '01.mp3', root / '02.mp3']
+            for path in paths:
+                path.write_bytes(b'audio')
+            worker = WhisperBatchWorker(make_tasks(root, paths), SimpleNamespace(
+                whisper_dir=str(root), whisper_cfg={}
+            ))
+            results = []
+            worker.task_result_signal.connect(
+                lambda task_id, ok, path: results.append((task_id, ok, path))
+            )
+            observations = []
+
+            class FakeProcess:
+                returncode = 0
+
+                def __init__(self, cmd, **kwargs):
+                    self.stdout = self.lines()
+
+                def lines(self):
+                    yield '正在翻译（1/2）：01.mp3\n'.encode('utf-8')
+                    yield '正在写入：01.lrc\n'.encode('utf-8')
+                    observations.append(len(results))  # 还未写盘时不能提早派发。
+                    paths[0].with_suffix('.lrc').write_text('complete', encoding='utf-8')
+                    yield '正在翻译（2/2）：02.mp3\n'.encode('utf-8')
+                    observations.append([task_id for task_id, _, _ in results])
+                    paths[1].with_suffix('.lrc').write_text('complete', encoding='utf-8')
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+            with patch('src.steps.step1_whisper.subprocess.Popen', FakeProcess):
+                worker.run()
+            self.assertEqual(observations, [0, ['task-0']])
+            self.assertEqual([task_id for task_id, ok, _ in results if ok],
+                             ['task-0', 'task-1'])
+
     def test_partial_selection_passes_files_in_one_process(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

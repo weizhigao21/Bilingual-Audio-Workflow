@@ -45,7 +45,7 @@ class BatchMixin:
         order_layout = QHBoxLayout(order_group)
         order_layout.addWidget(QLabel("模式:"))
         order_combo = QComboBox()
-        order_combo.addItem("流水线：语音与混音交错并行（最快）", "pipeline")
+        order_combo.addItem("流水线：字幕就绪即语音→混音（推荐）", "pipeline")
         order_combo.addItem("按步骤：先全部字幕→再全部语音→再全部混音", "by_step")
         order_combo.addItem("按任务：每个任务跑完三步再跑下一个", "by_task")
         order_layout.addWidget(order_combo, 1)

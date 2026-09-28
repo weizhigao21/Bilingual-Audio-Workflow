@@ -48,6 +48,7 @@ class BatchExecutor(
             order: 遍历顺序
                 "by_task" — 按任务：每个任务依次跑完所有步骤，再跑下一个任务
                 "by_step" — 按步骤：先把所有任务的step1跑完，再跑step2，再step3
+                "pipeline" — 集中识别字幕，每份就绪即生成语音，再进入混音队列
         """
         super().__init__(parent)
         self.tasks = tasks

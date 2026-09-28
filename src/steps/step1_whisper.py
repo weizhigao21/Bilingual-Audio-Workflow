@@ -234,6 +234,15 @@ class WhisperBatchWorker(QThread):
             self._reported[task_id] = ok
             self.task_result_signal.emit(task_id, ok, msg)
 
+    def _report_ready_subtitles(self, tasks, formats, previous):
+        """识别器已进入下一份音频或已退出，此时先前字幕已写完。"""
+        for task in tasks:
+            if task.task_id in self._reported:
+                continue
+            output = _find_subtitle(task.source_path, formats, previous.get(task.task_id))
+            if output:
+                self._report(task.task_id, True, output)
+
     @staticmethod
     def _normalized(path):
         return os.path.normcase(os.path.abspath(path))
@@ -396,6 +405,10 @@ class WhisperBatchWorker(QThread):
                 for line in _decode_console_line(raw).replace("\r", "\n").splitlines():
                     event = progress.feed(line)
                     if event:
+                        if progress.phase == "扫描":
+                            # 写入日志本身不能证明文件已关闭；下一份开始时
+                            # 再确认完整结果，避免 TTS 读到半份字幕。
+                            self._report_ready_subtitles(pending_tasks, formats, previous)
                         completed = completed_before_batch + event[0] * batch_count / 100
                         overall = int((existing_count + completed) * 100 / len(self.tasks))
                         self.progress_signal.emit(min(99, overall))
@@ -409,13 +422,14 @@ class WhisperBatchWorker(QThread):
             self._process.wait()
             returncode = self._process.returncode
             self._process = None
+            if not self._stop_flag:
+                self._report_ready_subtitles(pending_tasks, formats, previous)
             if returncode != 0 and not self._stop_flag:
                 self.log_signal.emit(f"[字幕批量] infer.exe 退出码: {returncode}")
                 for task_id in self._batch_task_ids(batch, pending_tasks):
                     failed_exit_codes[task_id] = returncode
             completed_before_batch += batch_count
 
-        recovered = 0
         for task in self.tasks:
             if task.task_id in self._reported:
                 continue
@@ -425,7 +439,6 @@ class WhisperBatchWorker(QThread):
             output = _find_subtitle(task.source_path, formats,
                                     previous.get(task.task_id))
             if output:
-                recovered += task.task_id in failed_exit_codes
                 self._report(task.task_id, True, output)
             else:
                 code = failed_exit_codes.get(task.task_id)
@@ -435,6 +448,7 @@ class WhisperBatchWorker(QThread):
 
         success = sum(self._reported.values())
         failed = len(self._reported) - success
+        recovered = sum(self._reported.get(task_id, False) for task_id in failed_exit_codes)
         if recovered:
             self.log_signal.emit(
                 f"[字幕批量] infer.exe 异常退出，但 {recovered} 个任务已生成字幕，按文件结果继续"
