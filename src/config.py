@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
                 "name": "本地服务器",
                 "url": "http://127.0.0.1:8000",
                 "model": "八重神子_ZH",
+                "model_tag": "",
                 "status": "success"
             }
         ],

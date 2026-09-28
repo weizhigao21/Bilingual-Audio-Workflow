@@ -10,6 +10,7 @@ import tempfile
 import edge_tts
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .tts_logger import logger
+from .tts_profile import api_cache_model
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
@@ -115,12 +116,14 @@ def generate_filename(index, timestamp, text, save_dir):
     return os.path.join(save_dir, file_name)
 
 
-def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache, source_mtime=0):
+def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache, source_mtime=0, model_tag=""):
     save_path = generate_filename(index, timestamp, text, save_dir)
     file_name = os.path.basename(save_path)
 
     source_version = str(int(source_mtime))
-    cache_model = f"{model_name}|{api_url.rstrip('/')}"
+    # 缓存键带上模型标签：同一 URL 上换了模型时，靠 model_tag 区分，
+    # 否则第二个模型会直接命中第一个模型的缓存音频
+    cache_model = api_cache_model(api_url, model_name, model_tag)
     cached_path = audio_cache.get_cached_audio(text, cache_model, source_version)
     if cached_path:
         try:
@@ -213,18 +216,19 @@ def test_api_server(url, timeout=5):
         return False, f"异常: {e}"
 
 
-def tts_bulk_task(tasks, api_url, model_name, audio_cache):
+def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag=""):
     results = [None] * len(tasks)
 
     uncached_tasks = []
     uncached_indices = []
+
+    cache_model = api_cache_model(api_url, model_name, model_tag)
 
     for i, (idx, timestamp, text, save_dir, file_mtime) in enumerate(tasks):
         save_path = generate_filename(idx, timestamp, text, save_dir)
         file_name = os.path.basename(save_path)
 
         source_version = str(int(file_mtime))
-        cache_model = f"{model_name}|{api_url.rstrip('/')}"
         cached_path = audio_cache.get_cached_audio(text, cache_model, source_version)
         if cached_path:
             try:
@@ -308,13 +312,13 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache):
             logger.warning(f"批量API无返回URL: {error_msg}, 回退到逐条模式")
             for i in uncached_indices:
                 idx, timestamp, text, save_dir, file_mtime = tasks[i]
-                success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime))
+                success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime), model_tag)
                 results[i] = (success, msg)
     except requests.exceptions.ConnectionError:
         logger.error(f"批量API连接失败: {api_endpoint}, 回退到逐条模式")
         for i, task in zip(uncached_indices, uncached_tasks):
             idx, timestamp, text, save_dir, file_mtime = task
-            success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime))
+            success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime), model_tag)
             results[i] = (success, msg)
     except Exception as e:
         logger.error(f"批量API异常: {e}", exc_info=True)

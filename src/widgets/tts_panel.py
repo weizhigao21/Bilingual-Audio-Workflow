@@ -328,11 +328,14 @@ class ApiConfigDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # 表格
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["名称", "URL", "模型", "状态"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["名称", "URL", "模型", "模型标签", "状态"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.SelectedClicked)
+        self.table.setToolTip(
+            "同一 URL 上换了模型时，在这里填不同的标签（如 GPT-SoVITS-女声A），\n"
+            "用于区分语音缓存与语音输出目录；留空则与旧版本行为一致。")
         layout.addWidget(self.table)
         self._refresh_table()
 
@@ -363,10 +366,12 @@ class ApiConfigDialog(QDialog):
             self.table.setItem(i, 0, QTableWidgetItem(api.get("name", "")))
             self.table.setItem(i, 1, QTableWidgetItem(api.get("url", "")))
             self.table.setItem(i, 2, QTableWidgetItem(api.get("model", "")))
-            self.table.setItem(i, 3, QTableWidgetItem(api.get("status", "unknown")))
+            self.table.setItem(i, 3, QTableWidgetItem(api.get("model_tag", "")))
+            self.table.setItem(i, 4, QTableWidgetItem(api.get("status", "unknown")))
 
     def _on_add(self):
-        self._apis.append({"name": "新服务器", "url": "http://", "model": "", "status": "unknown"})
+        self._apis.append({"name": "新服务器", "url": "http://", "model": "",
+                           "model_tag": "", "status": "unknown"})
         self._refresh_table()
         self.table.selectRow(len(self._apis) - 1)
 
@@ -382,10 +387,10 @@ class ApiConfigDialog(QDialog):
         from ..steps.tts_utils import test_api_server
         for i, api in enumerate(self._apis):
             url = api.get("url", "")
-            self.table.setItem(i, 3, QTableWidgetItem("测试中..."))
+            self.table.setItem(i, 4, QTableWidgetItem("测试中..."))
             ok, msg = test_api_server(url)
             api["status"] = "success" if ok else "failed"
-            self.table.setItem(i, 3, QTableWidgetItem(api["status"]))
+            self.table.setItem(i, 4, QTableWidgetItem(api["status"]))
             status_text = "✓ 可用" if ok else "✗ 不可用"
             self.log_message.emit(
                 f"[API测试] {api.get('name', '?')} ({url}) -> {status_text} ({msg})"
@@ -399,7 +404,8 @@ class ApiConfigDialog(QDialog):
             self._apis[i]["name"] = self.table.item(i, 0).text()
             self._apis[i]["url"] = self.table.item(i, 1).text()
             self._apis[i]["model"] = self.table.item(i, 2).text()
-            self._apis[i]["status"] = self.table.item(i, 3).text()
+            self._apis[i]["model_tag"] = self.table.item(i, 3).text().strip()
+            self._apis[i]["status"] = self.table.item(i, 4).text()
         if not self._apis:
             QMessageBox.warning(self, "提示", "至少保留一个 API 配置。")
             return

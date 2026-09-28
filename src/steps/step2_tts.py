@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """步骤2：语音生成。"""
 import os
-import hashlib
 
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 from ..config import WorkflowConfig
 from ..task_manager import TaskInfo
+from .tts_profile import dir_name
 from .tts_worker import TTSWorker
 
 
@@ -70,10 +70,11 @@ class TTSBridgeWorker(QThread):
 
         cfg = self.config.tts_cfg
 
-        # 计算字幕文件内容的MD5作为输出文件夹名
+        # 目录名 = md5(字幕内容 | 配音配置签名)：换模型/声音会落到不同目录，
+        # 不同模型的同名片段不再互相覆盖（见 tts_profile.dir_name）
         with open(lrc_path, 'rb') as f:
             subtitle_content = f.read()
-        self._subtitle_md5 = hashlib.md5(subtitle_content).hexdigest()[:8]
+        self._subtitle_md5 = dir_name(subtitle_content, cfg)
 
         tts_config = {
             "tts_mode": cfg.get("tts_mode", "edge"),

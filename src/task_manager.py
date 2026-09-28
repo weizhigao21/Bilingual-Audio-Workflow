@@ -4,7 +4,8 @@
 目录约定（现行结构）：
   workspace/
     <task_id>/task.json      # 任务状态，update_task() 时落盘
-    <字幕MD5[:8]>/*.wav      # TTS 输出，按字幕内容 MD5 寻址（见 tts_worker）
+    <配音配置签名目录>/*.wav  # TTS 输出，目录名 = md5(字幕内容 | 配音配置签名)[:8]，
+                             # 见 steps/tts_profile.dir_name（换模型/声音会换目录）
     源文件同目录/*.lrc       # 字幕与混音输出均落在源文件所在目录
 
 任务状态写入 task.json，启动时可恢复任务与文件夹组。
@@ -13,7 +14,6 @@ import os
 import re
 import json
 import time
-import hashlib
 import shutil
 import tempfile
 import logging
@@ -22,7 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field, asdict, fields
 from typing import Optional
-from .steps.tts_profile import profile_matches
+from .steps.tts_profile import (profile_matches, save_profile,
+                                dir_name, legacy_dir_name)
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -68,6 +69,28 @@ def generated_import_reason(root: str, source_path: str, custom_output: str = ""
     if os.path.splitext(os.path.basename(source_path))[0].endswith("_mixed"):
         return "文件名以 _mixed 结尾"
     return ""
+
+
+def migrate_voice_dir(old_dir, new_dir, tts_config):
+    """把历史命名的配音目录改名到新命名，命中返回新路径。
+
+    只做同盘 rename（不复制文件）；目标已存在或改名失败时返回空串，
+    由调用方按"没有可复用配音"处理——宁可重新生成，也不让
+    step2_output 指向旧名字的目录（否则检测到的目录与生成目录会分叉）。
+    """
+    if not new_dir or os.path.exists(new_dir):
+        return ""
+    try:
+        os.rename(old_dir, new_dir)
+    except OSError:
+        return ""
+    try:
+        if tts_config is not None:
+            # 目录名换了，顺带把 manifest 按当前配置重写一份
+            save_profile(new_dir, tts_config)
+    except OSError:
+        pass
+    return new_dir
 
 
 def _normalize_task_paths(data: dict) -> bool:
@@ -253,7 +276,11 @@ class TaskInfo:
             self.step3_output = mix_output
 
     def _detect_tts_by_subtitle_md5(self, tts_config=None):
-        """根据字幕文件MD5检查 workspace 中是否有已生成的语音文件。
+        """根据字幕内容 + 配音配置签名检查 workspace 中是否有已生成的语音文件。
+
+        目录名规则见 tts_profile.dir_name：md5(字幕内容 | 配置签名)[:8]，
+        因此换模型/声音后不会命中旧模型的目录。仍保留对旧命名
+        （只哈希字幕内容）的查找，签名匹配时原地迁移，避免整批重新生成。
 
         Returns:
             str: 语音文件夹路径，未找到则返回空字符串
@@ -262,14 +289,30 @@ class TaskInfo:
             return ""
         try:
             with open(self.step1_output, 'rb') as f:
-                md5 = hashlib.md5(f.read()).hexdigest()[:8]
-            tts_dir = os.path.join(self.workspace_root, md5)
-            if os.path.isdir(tts_dir) and (tts_config is None or profile_matches(tts_dir, tts_config)):
-                wavs = [f for f in os.listdir(tts_dir) if f.endswith(".wav")]
-                if wavs:
-                    return tts_dir
-        except Exception:
-            pass
+                content = f.read()
+        except OSError:
+            return ""
+
+        names = []
+        if tts_config is not None:
+            names.append(dir_name(content, tts_config))
+        names.append(legacy_dir_name(content))
+
+        for index, name in enumerate(names):
+            tts_dir = os.path.join(self.workspace_root, name)
+            if not os.path.isdir(tts_dir):
+                continue
+            if tts_config is not None and not profile_matches(tts_dir, tts_config):
+                continue
+            wavs = [f for f in os.listdir(tts_dir) if f.endswith(".wav")]
+            if not wavs:
+                continue
+            if index > 0:
+                # 命中旧命名目录 → 迁移到新命名；迁移失败视为不可复用
+                migrated = migrate_voice_dir(
+                    tts_dir, os.path.join(self.workspace_root, names[0]), tts_config)
+                return migrated
+            return tts_dir
         return ""
 
     def _detect_mix_output(self):
@@ -511,7 +554,40 @@ class TaskQueue(QObject):
             if task._detect_mix_output() and not task.force_remix:
                 task.force_remix = True
                 changed = True
+        # 旧命名的配音目录（只哈希字幕内容）迁移到新命名，避免重跑时另起目录
+        if self._migrate_legacy_voice_dir(task):
+            changed = True
         return changed
+
+    def _migrate_legacy_voice_dir(self, task: TaskInfo) -> bool:
+        """把任务指向的旧命名配音目录迁移到新命名，并更新 step2_output。
+
+        仅当"目录名恰好等于当前字幕内容的旧命名 + 配置签名匹配"时才动手，
+        因此字幕内容或配音配置变过的历史目录不受影响。返回是否发生迁移。
+        """
+        tts_config = self.tts_config
+        current = task.step2_output
+        if tts_config is None or not current or not os.path.isdir(current):
+            return False
+        if os.path.dirname(os.path.abspath(current)) != os.path.abspath(self.workspace_root):
+            return False  # 自定义配音目录或不在工作区内，不动
+        if not task.step1_output or not os.path.isfile(task.step1_output):
+            return False
+        try:
+            with open(task.step1_output, 'rb') as f:
+                content = f.read()
+        except OSError:
+            return False
+        if os.path.basename(current) != legacy_dir_name(content):
+            return False  # 已是新命名或来自其它字幕，不动
+        if not profile_matches(current, tts_config):
+            return False
+        target = os.path.join(self.workspace_root, dir_name(content, tts_config))
+        migrated = migrate_voice_dir(current, target, tts_config)
+        if not migrated:
+            return False
+        task.step2_output = migrated
+        return True
 
     def add_task(self, source_path: str,
                  subtitle_path: str = "", mix_folder: str = "",

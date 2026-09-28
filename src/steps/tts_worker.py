@@ -3,13 +3,12 @@ import re
 import queue
 import threading
 import time
-import hashlib
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .tts_cache import AudioCache
 from .tts_logger import logger
-from .tts_profile import profile_matches, save_profile
+from .tts_profile import profile_matches, save_profile, dir_name
 from .edge_voices import EDGE_TTS_VOICES
 from .tts_utils import (
     set_sleep_mode,
@@ -96,15 +95,15 @@ class TTSWorker(QThread):
             base_output = os.path.abspath(self.config["output_dir"])
             all_tasks = []
 
-            # 用字幕文件MD5作为文件夹名
+            # 目录名 = md5(字幕内容 | 配音配置签名)：由 step2_tts 算好传入；
+            # 兜底路径（无字幕时）用 source_name 走同一套命名，避免命名规则分叉
             subtitle_md5 = self.config.get("subtitle_md5", "")
             if not subtitle_md5:
-                # 兼容旧配置
                 source_name = self.config.get("source_name", "")
-                subtitle_md5 = hashlib.md5(source_name.encode("utf-8")).hexdigest()[:8]
+                subtitle_md5 = dir_name(source_name.encode("utf-8"), self.config)
             task_dir = os.path.join(base_output, subtitle_md5)
             os.makedirs(task_dir, exist_ok=True)
-            self.log_signal.emit(f"字幕MD5: {subtitle_md5}")
+            self.log_signal.emit(f"语音目录名: {subtitle_md5}")
             self.log_signal.emit(f"语音输出：{task_dir}")
 
             for lrc_path in lrc_files:
@@ -562,6 +561,7 @@ class TTSWorker(QThread):
                                 api_config["url"],
                                 api_config["model"],
                                 self.audio_cache,
+                                api_config.get("model_tag", ""),
                             )
                         except Exception as e:
                             results = [(False, f"批量异常: {e}") for _ in batch]
@@ -588,6 +588,7 @@ class TTSWorker(QThread):
                                 save_dir,
                                 self.audio_cache,
                                 file_mtime,
+                                api_config.get("model_tag", ""),
                             )
                             self.log_signal.emit(f"[{api_config['name']}] {msg}")
                             if not success:
