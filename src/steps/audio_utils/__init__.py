@@ -16,10 +16,10 @@ from .rms import (
     compute_rms_db, _mono_float_from_frames,
     compute_rms_envelope, interpolate_envelope,
 )
-from .mixing import overlay_with_pan, mix_with_numpy
+from .mixing import mix_with_numpy
 from .ffmpeg_utils import (
     export_audio_ffmpeg, resample_audio,
-    export_with_nvenc, extract_audio_from_video,
+    extract_audio_from_video,
     replace_audio_in_video, _run_ffmpeg,
 )
 
@@ -30,8 +30,8 @@ __all__ = [
     "detect_voice_onset", "find_nearest_onset", "detect_angles_parallel",
     "compute_rms_db", "_mono_float_from_frames",
     "compute_rms_envelope", "interpolate_envelope",
-    "overlay_with_pan", "mix_with_numpy",
-    "export_with_nvenc", "extract_audio_from_video",
+    "mix_with_numpy",
+    "extract_audio_from_video",
     "export_audio_ffmpeg", "resample_audio",
     "replace_audio_in_video", "_run_ffmpeg",
 ]

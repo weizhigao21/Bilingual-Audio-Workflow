@@ -35,6 +35,12 @@ WHISPER_MEDIA_SUFFIXES = (
     "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv,ts"
 )
 
+# 已废弃、无任何代码读取的历史配置键：加载时剔除并回写，
+# 避免配置文件里长期留着"看起来能调、其实不生效"的选项。
+DEPRECATED_CONFIG_KEYS = {
+    "mixer": ("use_gpu", "pipeline_mix_workers"),
+}
+
 # 默认配置
 DEFAULT_CONFIG = {
     "setup_completed": False,
@@ -87,7 +93,6 @@ DEFAULT_CONFIG = {
         "audio_sample_rate": 44100,
         "audio_channels": 2,
         "wav_bit_depth": 16,
-        "use_gpu": True,
         "channel_detect": True,
         "align_onset": True,
         "content_alignment": False,
@@ -141,6 +146,7 @@ class WorkflowConfig:
 
     def _load(self):
         path = get_config_path()
+        migrated = False
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -149,8 +155,31 @@ class WorkflowConfig:
                 # 旧版未提供格式编辑入口；升级旧默认值以覆盖导入器支持的格式。
                 if self.config["whisper"].get("audio_suffixes") == LEGACY_WHISPER_MEDIA_SUFFIXES:
                     self.config["whisper"]["audio_suffixes"] = WHISPER_MEDIA_SUFFIXES
+                    migrated = True
             except Exception as e:
                 print(f"[配置] 加载失败，使用默认配置: {e}")
+        if self._drop_deprecated_keys():
+            migrated = True
+        if migrated:
+            # 迁移结果必须落盘：否则 audio_suffixes 每次启动都要重新升级，
+            # 用户翻看配置文件时也会看到早已失效的旧值。
+            try:
+                self.save()
+            except OSError as e:
+                print(f"[配置] 迁移保存失败: {e}")
+
+    def _drop_deprecated_keys(self) -> bool:
+        """剔除已无代码读取的历史配置键，返回是否发生修改。"""
+        changed = False
+        for section, keys in DEPRECATED_CONFIG_KEYS.items():
+            block = self.config.get(section)
+            if not isinstance(block, dict):
+                continue
+            for key in keys:
+                if key in block:
+                    block.pop(key, None)
+                    changed = True
+        return changed
 
     def save(self):
         path = get_config_path()

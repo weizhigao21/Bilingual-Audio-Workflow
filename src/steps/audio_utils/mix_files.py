@@ -37,10 +37,19 @@ def get_mix_audio_files(mix_folder):
 
     audio_files = []
     for f in os.listdir(mix_folder):
-        if f.endswith(".wav"):
-            parsed = parse_filename(f)
-            if parsed:
-                audio_files.append(parsed)
+        if not f.endswith(".wav"):
+            continue
+        parsed = parse_filename(f)
+        if not parsed:
+            continue
+        # 跳过 0 字节片段：历史上出现过合成中断/下载失败留下的空文件，
+        # 它们对混音没有贡献，长音频路径还会因解码失败拖垮整段处理。
+        try:
+            if os.path.getsize(os.path.join(mix_folder, f)) == 0:
+                continue
+        except OSError:
+            continue
+        audio_files.append(parsed)
 
     audio_files.sort(key=lambda x: x["sequence"])
     _mix_files_cache[mix_folder] = audio_files

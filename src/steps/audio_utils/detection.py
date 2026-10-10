@@ -113,6 +113,36 @@ def detect_voice_onset(audio_segment, energy_threshold_ratio=0.02, min_onset_ms=
         return 0
 
 
+def _frame_rms_energy(segment, frame_len, hop_len):
+    """分块滑动窗口的短时 RMS 能量（逐帧循环的向量化等价实现）。
+
+    用块内累积和计算窗口能量，避免一次物化 (帧数 × 帧长) 的窗口矩阵，
+    因此搜索区间很长时内存依然有界；数值上与逐帧 `sqrt(mean(frame**2))` 一致。
+    """
+    if not len(segment):
+        return np.zeros(0)
+    if len(segment) <= frame_len:
+        return np.array([np.sqrt(np.mean(segment ** 2))], dtype=np.float64)
+
+    num_frames = (len(segment) - frame_len) // hop_len + 1
+    energy = np.empty(num_frames, dtype=np.float64)
+    wins_per_block = 128
+    local_starts = np.arange(wins_per_block) * hop_len
+    for s0 in range(0, num_frames, wins_per_block):
+        s1 = min(s0 + wins_per_block, num_frames)
+        f0 = s0 * hop_len
+        f1 = (s1 - 1) * hop_len + frame_len
+        chunk = segment[f0:f1]
+        cumulative = np.empty(len(chunk) + 1, dtype=np.float64)
+        cumulative[0] = 0.0
+        np.cumsum(chunk * chunk, out=cumulative[1:])
+        local = local_starts[:s1 - s0]
+        energy[s0:s1] = np.sqrt(
+            (cumulative[local + frame_len] - cumulative[local]) / frame_len
+        )
+    return energy
+
+
 def find_nearest_onset(mono_samples, sr, target_ms, search_start_ms, search_end_ms,
                        frame_len=1024, hop_len=512, max_offset_ms=500):
     """在单声道样本数组指定范围内检测人声起始点，返回最接近 target_ms 的起始点。
@@ -147,15 +177,9 @@ def find_nearest_onset(mono_samples, sr, target_ms, search_start_ms, search_end_
 
         segment = mono_samples[start_sample:end_sample]
 
-        # 计算短时 RMS 能量（向量化，避免 Python for 循环）
-        num_frames = max(1, (len(segment) - frame_len) // hop_len + 1)
-        energy = np.zeros(num_frames)
-        for i in range(num_frames):
-            start = i * hop_len
-            end = min(start + frame_len, len(segment))
-            if end > start:
-                frame = segment[start:end]
-                energy[i] = np.sqrt(np.mean(frame ** 2))
+        # 短时 RMS 能量：向量化的分块实现，避免逐帧 Python 循环，
+        # 同时限制临时数组大小（搜索区间很长时也不会一次物化全部窗口）。
+        energy = _frame_rms_energy(segment, frame_len, hop_len)
 
         if len(energy) < 3:
             return target_ms

@@ -13,6 +13,7 @@ from ...task_manager import TaskInfo, STEP_DONE, STEP_SKIPPED, STEP_FAILED, STEP
 from ..step1_whisper import WhisperWorker, WhisperBatchWorker
 from ..step2_tts import TTSBridgeWorker
 from ..step3_mixer import MixerWorker, MixerBatchWorker
+from ..audio_utils import clear_mix_cache
 from .by_task_mixin import ByTaskMixin
 from .by_step_mixin import ByStepMixin
 from .single_step_mixin import SingleStepMixin
@@ -140,12 +141,18 @@ class BatchExecutor(
     def run(self):
         total = len(self.tasks)
 
-        if self.order == "by_step":
-            success, fail, skipped = self._run_by_step(total)
-        elif self.order == "pipeline":
-            success, fail, skipped = self._run_pipeline(total)
-        else:
-            success, fail, skipped = self._run_by_task(total)
+        try:
+            if self.order == "by_step":
+                success, fail, skipped = self._run_by_step(total)
+            elif self.order == "pipeline":
+                success, fail, skipped = self._run_pipeline(total)
+            else:
+                success, fail, skipped = self._run_by_task(total)
+        finally:
+            # by_task / by_step 的单步混音走 MixerWorker（不是 MixerBatchWorker），
+            # 不会自行清理 _mix_files_cache；这里统一收尾，避免批量混音
+            # 多个任务后片段列表缓存持续累积。
+            clear_mix_cache()
 
         self.log_signal.emit(
             f"\n[批量] 全部完成: 成功 {success}, 失败 {fail}, 跳过 {skipped}"

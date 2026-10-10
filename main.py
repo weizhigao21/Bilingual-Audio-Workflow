@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 
 from src.crash_log import install as install_crash_log
+from src.steps.tts_logger import purge_old_logs
 from src.workflow_gui import WorkflowMainWindow
 from src.config import WorkflowConfig
 from src.version import APP_VERSION
@@ -44,6 +45,11 @@ _ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def main():
     # 兜底钩子必须在 QApplication 创建前安装（Qt 消息处理器的替换时机）
     install_crash_log()
+    # 清理超过保留期的历史日志：日志按天命名，轮转只作用于单日文件，
+    # 跨天的旧文件需要主动回收，避免 resources/logs 无限增长。
+    purged = purge_old_logs()
+    if purged:
+        print(f"[日志] 已清理 {purged} 个过期日志文件")
     app = QApplication(sys.argv)
     if os.path.exists(_ICON_PATH):
         app.setWindowIcon(QIcon(_ICON_PATH))

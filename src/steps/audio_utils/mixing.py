@@ -61,71 +61,6 @@ def _finish_mix(samples, sample_width, mode, stop_check=None, output_path=None):
     return result
 
 
-def overlay_with_pan(original, mix_segment, position, angle_degrees):
-    import math
-    if mix_segment.channels == 1:
-        mix_mono = mix_segment
-    else:
-        mix_mono = mix_segment.split_to_mono()[0]
-
-    if original.channels == 1:
-        return original.overlay(mix_mono, position=position)
-
-    if np is None:
-        return original.overlay(mix_mono, position=position)
-
-    try:
-        left, right = original.split_to_mono()
-
-        angle_rad = angle_degrees * math.pi / 180.0
-        left_gain = math.cos(angle_rad / 2.0)
-        right_gain = math.sin(angle_rad / 2.0)
-
-        sr = original.frame_rate
-        sw = original.sample_width
-        dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
-        dtype = dtype_map.get(sw, np.int16)
-        max_val = 2 ** (sw * 8 - 1) - 1
-
-        left_raw = np.array(left.get_array_of_samples(), dtype=dtype).astype(np.float64)
-        right_raw = np.array(right.get_array_of_samples(), dtype=dtype).astype(np.float64)
-
-        if mix_mono.frame_rate != sr:
-            mix_mono = mix_mono.set_frame_rate(sr)
-        mix_dtype = dtype_map.get(mix_mono.sample_width, np.int16)
-        mix_raw = np.frombuffer(mix_mono.raw_data, dtype=mix_dtype).astype(np.float64)
-
-        start_frame = round(position * sr / 1000)
-        end_frame = min(start_frame + len(mix_raw), len(left_raw), len(right_raw))
-        mix_len = end_frame - start_frame
-        if mix_len > 0:
-            mix_chunk = mix_raw[:mix_len]
-            left_raw[start_frame:end_frame] += mix_chunk * left_gain
-            right_raw[start_frame:end_frame] += mix_chunk * right_gain
-
-        combined = np.stack([left_raw, right_raw], axis=1)
-        threshold = 0.9
-        x = combined / max_val
-        abs_x = np.abs(x)
-        sign_x = np.sign(x)
-        excess = np.maximum(abs_x - threshold, 0.0) / (1.0 - threshold)
-        clipped_abs = np.where(
-            abs_x > threshold,
-            threshold + (1.0 - threshold) * np.tanh(excess),
-            abs_x,
-        )
-        combined = sign_x * clipped_abs * max_val
-        combined = np.clip(combined, -max_val - 1, max_val).astype(dtype)
-
-        interleaved = np.empty(len(combined) * 2, dtype=dtype)
-        interleaved[0::2] = combined[:, 0]
-        interleaved[1::2] = combined[:, 1]
-
-        return left._spawn(interleaved.tobytes(), overrides={'channels': 2})
-    except Exception:
-        return original.overlay(mix_mono, position=position)
-
-
 def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
                    align_onset=False, content_alignment=False,
                    peak_mode="peak", high_quality=True, stop_check=None,
@@ -221,8 +156,22 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
         for i, (mix_seg, pos_ms, angle) in enumerate(mix_items):
             _check_stop(stop_check)
             if isinstance(mix_seg, (str, os.PathLike)):
-                with open(mix_seg, "rb") as clip_file:
-                    mix_seg = AudioSegment.from_file(clip_file)
+                # 长音频走磁盘缓冲时传入的是片段路径，在此处按需解码。
+                # 与短音频路径（step3_mixer 预加载片段）行为对齐：单个片段
+                # 损坏、缺失或为空只跳过该片段，不让整段混音整体失败。
+                try:
+                    with open(mix_seg, "rb") as clip_file:
+                        mix_seg = AudioSegment.from_file(clip_file)
+                except Exception as exc:
+                    logger.warning(f"[混音] 片段读取失败，已跳过: {mix_seg} - {exc}")
+                    if item_callback is not None:
+                        item_callback(i + 1, len(mix_items))
+                    continue
+                if len(mix_seg) == 0:
+                    logger.warning(f"[混音] 片段为空，已跳过: {mix_seg}")
+                    if item_callback is not None:
+                        item_callback(i + 1, len(mix_items))
+                    continue
             if mix_seg.channels == 1:
                 mix_mono = mix_seg
             else:

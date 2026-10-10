@@ -55,11 +55,6 @@ def export_audio_ffmpeg(audio_segment, output_path, format_type="mp3",
     _run_ffmpeg(cmd, stop_check=stop_check, input_data=audio_segment.raw_data)
 
 
-def export_with_nvenc(*args, **kwargs):
-    """保留旧导入接口。音频使用软件编码器，不依赖 NVIDIA 显卡。"""
-    return export_audio_ffmpeg(*args, **kwargs)
-
-
 def probe_audio(source_path):
     """返回 (采样率, 时长秒)，无音轨或探测失败时返回 None。"""
     try:
