@@ -42,6 +42,13 @@
         "url": "http://127.0.0.1:8001",
         "model": "八重神子_ZH",
         "status": "success"
+      },
+      {
+        "name": "本地配音工作台 · IndexTTS2.5",
+        "url": "http://127.0.0.1:8765",
+        "model": "index-2.5-q8-voice1@5573057c5765",
+        "model_tag": "5573057c5765e7f9f4ae4fd0b86df02b60af17e803724736ac0a71c25519185b",
+        "status": "unknown"
       }
     ]
   },

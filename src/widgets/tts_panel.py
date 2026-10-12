@@ -9,6 +9,7 @@ from PyQt6.QtCore import pyqtSignal
 
 from ..steps.tts_cache import AudioCache
 from .common import EDGE_TTS_VOICES, RATE_PRESETS, VOLUME_PRESETS
+from .local_voice_picker import VoicePicker
 
 
 class TTSConfigPanel(QGroupBox):
@@ -135,6 +136,9 @@ class TTSConfigPanel(QGroupBox):
         self.bulk_check.toggled.connect(self._save)
         api_layout.addWidget(self.bulk_check, 3, 0, 1, 3)
 
+        self.local_voice_picker = VoicePicker(self)
+        api_layout.addWidget(self.local_voice_picker, 4, 0, 1, 4)
+
         # 用 QStackedWidget 切换 edge/api 面板，避免窗口被撑大后不缩小
         self.config_stack = QStackedWidget()
         self.config_stack.addWidget(self.edge_group)   # index 0 = edge
@@ -212,6 +216,7 @@ class TTSConfigPanel(QGroupBox):
         if 0 <= idx < self.api_combo.count():
             self.api_combo.setCurrentIndex(idx)
         self.api_combo.blockSignals(False)
+        self.local_voice_picker.sync_from_config()
 
     def _on_mode_changed(self):
         mode = self.mode_combo.currentData()
@@ -222,6 +227,7 @@ class TTSConfigPanel(QGroupBox):
         idx = self.api_combo.currentIndex()
         self.config.tts_cfg["current_api_index"] = max(0, idx)
         self._save()
+        self.local_voice_picker.sync_from_config()
 
     def _on_edit_apis(self):
         dialog = ApiConfigDialog(self.config, self)

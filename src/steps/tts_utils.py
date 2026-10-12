@@ -11,6 +11,7 @@ import edge_tts
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .tts_logger import logger
 from .tts_profile import api_cache_model
+from .local_voice_client import is_local_service, generate_local_tasks
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
@@ -93,6 +94,32 @@ def get_edge_executor(max_workers):
     return _edge_executor
 
 
+# ---------- Edge TTS 合成端点兼容 ----------
+# 2026-10 起微软拒绝 speech.platform.bing.com 上的 WSS 合成请求
+# （403 Invalid response status），Edge 浏览器改走 api.msedgeservices.com
+# （edge-tts 官方修复 rany2/edge-tts#491 尚未发布新版本）。
+# 官方修复落地前运行时改指向新主机；检测到库已在使用新主机时不覆盖，
+# 官方版本发布后本补丁自动失效，无需改动。
+_EDGE_WSS_LEGACY_HOST = "speech.platform.bing.com"
+_EDGE_WSS_NEW_HOST = "api.msedgeservices.com"
+
+
+def patch_edge_wss_endpoint():
+    """把 edge-tts 的 WSS 合成端点改指向微软新主机；幂等，可重复调用。"""
+    import edge_tts.communicate as edge_communicate
+    from edge_tts.constants import TRUSTED_CLIENT_TOKEN
+    current = getattr(edge_communicate, "WSS_URL", "")
+    if _EDGE_WSS_LEGACY_HOST in current:
+        edge_communicate.WSS_URL = (
+            f"wss://{_EDGE_WSS_NEW_HOST}/tts/cognitiveservices/websocket/v1"
+            f"?Ocp-Apim-Subscription-Key={TRUSTED_CLIENT_TOKEN}"
+        )
+    return edge_communicate.WSS_URL
+
+
+patch_edge_wss_endpoint()
+
+
 def set_sleep_mode(prevent=True):
     if os.name == "nt":
         try:
@@ -116,7 +143,7 @@ def generate_filename(index, timestamp, text, save_dir):
     return os.path.join(save_dir, file_name)
 
 
-def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache, source_mtime=0, model_tag=""):
+def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache, source_mtime=0, model_tag="", cancel_check=None, workflow_context=None):
     save_path = generate_filename(index, timestamp, text, save_dir)
     file_name = os.path.basename(save_path)
 
@@ -132,6 +159,12 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
             return True, f"缓存复用: {file_name}"
         except Exception as e:
             logger.warning(f"缓存复制失败: {file_name} - {e}")
+
+    if is_local_service(_get_session(), api_url):
+        task = (index, timestamp, text, save_dir, source_mtime)
+        return generate_local_tasks(_get_session(), api_url, model_name, [task],
+                                    audio_cache, cache_model, generate_filename, _download_audio,
+                                    cancel_check=cancel_check, workflow_context=workflow_context)[0]
 
     api_base_url = api_url.rstrip("/")
     api_endpoint = f"{api_base_url}/infer_single"
@@ -216,7 +249,7 @@ def test_api_server(url, timeout=5):
         return False, f"异常: {e}"
 
 
-def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag=""):
+def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_check=None, workflow_context=None):
     results = [None] * len(tasks)
 
     uncached_tasks = []
@@ -242,6 +275,14 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag=""):
         uncached_indices.append(i)
 
     if not uncached_tasks:
+        return results
+
+    if is_local_service(_get_session(), api_url):
+        local_results = generate_local_tasks(_get_session(), api_url, model_name, uncached_tasks,
+                                             audio_cache, cache_model, generate_filename, _download_audio,
+                                             cancel_check=cancel_check, workflow_context=workflow_context)
+        for index, result in zip(uncached_indices, local_results):
+            results[index] = result
         return results
 
     api_base_url = api_url.rstrip("/")
@@ -381,7 +422,10 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
                 _safe_unlink(temp_path)
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {e}")
+                if "403" in last_error or "Invalid response status" in last_error:
+                    last_error += ("（微软合成端点拒绝请求：请确认系统时钟准确，"
+                                   "或更换网络环境/代理后重试；持续失败请更新本程序）")
+                logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {last_error}")
                 _safe_unlink(temp_path)
             if attempt < max_retries:
                 time.sleep(1)

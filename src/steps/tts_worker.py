@@ -3,6 +3,7 @@ import re
 import queue
 import threading
 import time
+import uuid
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -58,6 +59,8 @@ class TTSWorker(QThread):
         self.paused = False
         self.stop_flag = False
         self.pause_lock = threading.Lock()
+        self.workflow_context = {"key": uuid.uuid4().hex,
+                                 "title": "双语配音 · " + os.path.splitext(os.path.basename(config.get("source_name") or (config.get("lrc_files") or ["字幕"])[0]))[0][:150]}
         self.audio_cache = AudioCache()
 
     def pause(self):
@@ -562,6 +565,8 @@ class TTSWorker(QThread):
                                 api_config["model"],
                                 self.audio_cache,
                                 api_config.get("model_tag", ""),
+                                cancel_check=lambda: self.stop_flag,
+                                workflow_context=self.workflow_context,
                             )
                         except Exception as e:
                             results = [(False, f"批量异常: {e}") for _ in batch]
@@ -589,6 +594,8 @@ class TTSWorker(QThread):
                                 self.audio_cache,
                                 file_mtime,
                                 api_config.get("model_tag", ""),
+                                cancel_check=lambda: self.stop_flag,
+                                workflow_context=self.workflow_context,
                             )
                             self.log_signal.emit(f"[{api_config['name']}] {msg}")
                             if not success:

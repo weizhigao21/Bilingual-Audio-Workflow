@@ -7,6 +7,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from ..config import WorkflowConfig
 from ..task_manager import TaskInfo
 from .tts_profile import dir_name
+from .local_voice_client import prepare_workflow_config
 from .tts_worker import TTSWorker
 
 
@@ -34,12 +35,14 @@ class TTSBridgeWorker(QThread):
         self._eta_text = "计算中..."
         # 同步结果：(success, output_dir_or_error)，供流水线模式 wait() 后读取
         self.result = (False, "未执行")
+        self._last_tts_error = ""
 
     def _emit_finished(self, ok: bool, msg: str):
         self.result = (ok, msg)
         self.finished_signal.emit(ok, msg)
 
     def stop(self):
+        self.requestInterruption()
         if self._tts_worker:
             try:
                 self._tts_worker.stop()
@@ -68,7 +71,10 @@ class TTSBridgeWorker(QThread):
             self._emit_finished(False, f"字幕文件不存在: {lrc_path}")
             return
 
-        cfg = self.config.tts_cfg
+        cfg = prepare_workflow_config(self.config)
+        if self.isInterruptionRequested():
+            self._emit_finished(False, "语音生成已取消")
+            return
 
         # 目录名 = md5(字幕内容 | 配音配置签名)：换模型/声音会落到不同目录，
         # 不同模型的同名片段不再互相覆盖（见 tts_profile.dir_name）
@@ -115,7 +121,7 @@ class TTSBridgeWorker(QThread):
         # 创建 TTSWorker 并桥接信号
         self._tts_worker = TTSWorker(tts_config)
         self._tts_worker.log_signal.connect(
-            self.log_signal.emit, Qt.ConnectionType.DirectConnection
+            self._on_tts_log, Qt.ConnectionType.DirectConnection
         )
         # progress 先归一化为 0-100 百分比再转发：
         # TTSWorker 发的是"已完成片段数"(0..total)，与步骤1/3 的百分比语义不一致，
@@ -195,10 +201,17 @@ class TTSBridgeWorker(QThread):
         self.eta_signal.emit(text)
         self._emit_pct_and_status()
 
+    def _on_tts_log(self, message: str):
+        # 保留有片段位置的原始错误，让任务失败信息直接可定位。
+        if any(word in message for word in ("失败", "错误", "异常", "超时", "连接失败", "：本地配音")):
+            if "第 " in message or not self._last_tts_error:
+                self._last_tts_error = message
+        self.log_signal.emit(message)
+
     def _on_finished(self, success: bool):
         """TTSWorker 完成回调。"""
         if not success:
-            self._emit_finished(False, "TTS 合成失败，详见日志")
+            self._emit_finished(False, self._last_tts_error or "TTS 合成失败，详见日志")
             return
 
         # 查找输出目录：workspace_root/<subtitle_md5>/
