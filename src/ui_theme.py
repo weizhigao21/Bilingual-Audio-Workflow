@@ -25,14 +25,22 @@ from PyQt6.QtWidgets import (
 # ---------------------------------------------------------------- 色板
 # 与 UI_STYLE.md「颜色与字体」一一对应
 PALETTE = {
-    "bg": "#ffffff",            # 主背景、内容区
-    "sidebar": "#fafafa",       # 侧栏、轻量悬停
+    # —— 分区策略：表面保持白/近白，靠"看得见的边界线"划分功能区域 ——
+    # 曾试过灰阶分层（canvas #f0f0f3 / sidebar #e7e7eb），用户反馈"太丑"，
+    # 想要的是"干净的白 + 线条分区"。所以表面全部回白，分区改由 border
+    # 承担——但线必须真的看得见，旧的 #eeeeee 与白底只差 17 灰阶，1x 屏上
+    # 等于没有边界，那才是"区域区分不明显"的真正原因。
+    "bg": "#ffffff",            # 卡片、输入框、按钮、菜单（纯白）
+    "canvas": "#ffffff",        # 工作区底：与卡片同白，区域感由边界线给出
+    "sidebar": "#fbfbfc",       # 侧栏：极轻表面差，主要靠右侧 1px 边界线分界
+    "inset": "#f0f0f3",         # 内凹底：分段容器、状态药丸（需与白前景拉开）
     "text": "#18181a",          # 主文字、主按钮背景
-    "text_secondary": "#6b6b6e",  # 次要文字
-    "text_label": "#85858a",    # 辅助标签
-    "border": "#e5e5e7",        # 输入框边框
-    "separator": "#eeeeee",     # 区域分隔线 1px
-    "selected": "#f1f1f1",      # 列表选中背景
+    "text_secondary": "#63636a",  # 次要文字
+    "text_label": "#7e7e88",    # 辅助标签
+    "border": "#d4d4da",        # 区域边界线 / 卡片边框（与白底差 ≥25 才可见）
+    "separator": "#ececf0",     # 区域内二级分隔（卡片行间、菜单、表头）
+    "selected": "#ededf0",      # 列表选中背景
+    "row_hover": "#f4f4f6",     # 侧栏任务行悬停（比侧栏底深一档，浅于选中）
     "accent": "#e0651c",        # 强调色（进度、焦点、进行中）
     "focus": "#d9ac8c",         # 输入焦点边框
     "ready": "#2e7d32",         # 就绪/完成状态（明确的绿，用于状态药丸与日志成功）
@@ -40,12 +48,12 @@ PALETTE = {
     "ready_border": "#cbe4cf",  # 完成态浅绿边框
     "error": "#a2462e",         # 错误文字
     # 以下为派生色（规范未直接给出，按同色系推导，仅用于悬停/禁用等中间态）
-    "hover": "#f3f3f4",
-    "pressed": "#eaeaec",
+    "hover": "#f4f4f6",
+    "pressed": "#ececf0",
     "primary_hover": "#343436",
     "disabled_text": "#b0b0b4",
-    "disabled_bg": "#f7f7f7",
-    "disabled_border": "#eeeeef",
+    "disabled_bg": "#f7f7f9",
+    "disabled_border": "#efeff2",
     "primary_disabled": "#d6d6d9",
 }
 
@@ -89,11 +97,29 @@ MIN_WINDOW_SIZE = (1080, 720)
 
 
 def _resource_dir() -> str:
-    """资源目录：开发时为项目根 resources/，打包后为 exe 所在目录 resources/。"""
+    """资源目录：开发时为项目根 ``resources/``，打包后为**资源包内**的 ``resources/``。
+
+    打包版务必走 ``sys._MEIPASS``，**不能用 ``os.path.dirname(sys.executable)``**：
+    PyInstaller 6 起 onedir 模式把 ``.spec`` 的 datas（含 ``resources/ui/check.png``）
+    全部放进 ``_internal/``，而 ``sys._MEIPASS`` 正指向 ``_internal``；exe 同级目录下
+    根本没有 ``resources/``。这一步走错会让 ``resource_url()`` **静默返回空串**
+    （只读资源没有兜底），QSS 里少掉 ``image: url(...)``，勾选框就退化成纯黑方块
+    ——即"完成""多 API 轮询"等所有勾选项一律不见勾。该缺陷是**打包版专属**，
+    源码运行与离屏测试都察觉不到（``__file__`` 在源码下是对的）。
+    """
     if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # onedir / onefile 均以 _MEIPASS 为准；保留 exe 同级目录作兼容回退
+        # （老式打包布局把 datas 放在 exe 旁边）
+        candidates = [getattr(sys, "_MEIPASS", None),
+                      os.path.dirname(sys.executable)]
+        for base in candidates:
+            if not base:
+                continue
+            candidate = os.path.join(base, "resources")
+            if os.path.isdir(candidate):
+                return candidate
+        return os.path.join(candidates[0] or candidates[1], "resources")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, "resources")
 
 
@@ -133,7 +159,9 @@ QWidget {{
     font-size: {FONT_BODY}px;
     color: {p['text']};
 }}
-QMainWindow, QDialog {{ background: {p['bg']}; }}
+/* 顶层窗口用"画布灰"，让白色卡片浮起来；卡片本身仍是纯白 */
+QMainWindow {{ background: {p['canvas']}; }}
+QDialog {{ background: {p['canvas']}; }}
 QToolTip {{
     background: {p['bg']}; color: {p['text']};
     border: 1px solid {p['border']}; border-radius: 4px; padding: 4px 6px;
@@ -154,7 +182,7 @@ QLabel[role="success"] {{ color: {p['ready']}; font-size: {FONT_AUX}px; }}
 /* ---------- 状态药丸（文字+颜色双通道） ---------- */
 QLabel[pill="true"] {{
     border-radius: 9px; padding: 2px 9px; font-size: {FONT_AUX}px;
-    background: {p['sidebar']}; color: {p['text_label']}; border: 1px solid {p['separator']};
+    background: {p['inset']}; color: {p['text_label']}; border: 1px solid {p['separator']};
 }}
 QLabel[pill="true"][status="running"] {{ color: {p['accent']}; background: #fdf3ec; border-color: #f3d9c6; }}
 QLabel[pill="true"][status="done"] {{ color: {p['ready']}; background: {p['ready_bg']}; border-color: {p['ready_border']}; }}
@@ -224,6 +252,22 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{ background: {p['accent']}; border-radius: 1px; }}
 
+/* ---------- 滑块（分离度等连续参数） ---------- */
+/* 细槽 + 圆形白柄：与整体"细线条"语言一致，不用 Fusion 默认的粗槽 */
+QSlider::groove:horizontal {{
+    height: 4px; border-radius: 2px; background: {p['separator']};
+}}
+QSlider::sub-page:horizontal {{ background: {p['text']}; border-radius: 2px; }}
+QSlider::add-page:horizontal {{ background: {p['separator']}; border-radius: 2px; }}
+QSlider::handle:horizontal {{
+    width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
+    background: {p['bg']}; border: 1px solid {p['border']};
+}}
+QSlider::handle:horizontal:hover {{ border-color: {p['focus']}; }}
+QSlider::handle:horizontal:pressed {{ background: {p['hover']}; }}
+QSlider::sub-page:horizontal:disabled {{ background: {p['disabled_bg']}; }}
+QSlider::handle:horizontal:disabled {{ background: {p['disabled_bg']}; border-color: {p['disabled_border']}; }}
+
 /* ---------- 滚动条（细） ---------- */
 QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: #d6d6d8; border-radius: 4px; min-height: 24px; }}
@@ -236,35 +280,47 @@ QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 
 /* ---------- 主工作台骨架（侧栏 + 中央两区） ---------- */
-QWidget#sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['separator']}; }}
-QWidget#centerPane {{ background: {p['bg']}; }}
-QWidget#toolbarDivider {{ background: {p['separator']}; }}
+QWidget#sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border']}; }}
+QWidget#centerPane {{ background: {p['canvas']}; }}
+QWidget#toolbarDivider {{ background: {p['border']}; }}
+/* 页头（当前条目 + 工具栏）与下方滚动内容的分界线：
+   没有这条线时工具栏与第一张卡片同色相邻，看不出"固定区/滚动区"之分 */
+QWidget#headerRule {{ background: {p['border']}; }}
 
 /* ---------- 卡片（步骤卡 / 日志卡 / 属性卡） ---------- */
 QWidget[card="true"], QFrame[card="true"] {{
-    background: {p['bg']}; border: 1px solid {p['separator']}; border-radius: {RADIUS_CARD}px;
+    background: {p['bg']}; border: 1px solid {p['border']}; border-radius: {RADIUS_CARD}px;
 }}
+/* 步骤卡左缘状态色条：一眼看出"现在在哪一步"。
+   四条规则都把宽度钉死 3px（含 pending 用中性色），状态切换不产生宽度跳动。 */
+QFrame[card="true"][state="pending"] {{ border-left: 3px solid {p['border']}; }}
+QFrame[card="true"][state="running"] {{ border-left: 3px solid {p['accent']}; }}
+QFrame[card="true"][state="done"] {{ border-left: 3px solid {p['ready']}; }}
+QFrame[card="true"][state="failed"] {{ border-left: 3px solid {p['error']}; }}
+QFrame[card="true"][state="skipped"] {{ border-left: 3px solid {p['disabled_text']}; }}
 QLabel#stepBadge {{
     background: {p['text']}; color: #ffffff; border-radius: 5px;
     font-size: {FONT_AUX}px;
 }}
 
 /* ---------- 运行日志（等宽、细边框，高度由代码按需限制） ---------- */
+/* 卡内"内容井"：白底 + 边框，与日志卡自身的边框形成明确的内嵌关系
+   （分区策略是"白表面 + 边界线"，所以这里不再用灰底降明度） */
 QTextEdit#logView {{
     font-family: {MONO_FAMILY}; font-size: {FONT_AUX}px;
-    background: {p['bg']}; border: 1px solid {p['separator']};
+    background: {p['bg']}; border: 1px solid {p['border']};
     border-radius: {RADIUS_CARD}px; padding: 8px;
 }}
 
 /* ---------- 设置分组容器（白底、细边框、13px 圆角、行间细线） ---------- */
 QWidget#settingsGroup {{
-    background: {p['bg']}; border: 1px solid {p['separator']}; border-radius: {RADIUS_SETTINGS_CARD}px;
+    background: {p['bg']}; border: 1px solid {p['border']}; border-radius: {RADIUS_SETTINGS_CARD}px;
 }}
 QWidget#settingsGroup QWidget[row="true"] {{ background: transparent; }}
 QWidget#settingsGroup QWidget[separator="true"] {{ background: {p['separator']}; min-height: 1px; max-height: 1px; }}
 
 /* ---------- 分段按钮（选中项白底细边框） ---------- */
-QWidget#segmented {{ background: {p['sidebar']}; border: 1px solid {p['border']}; border-radius: {RADIUS_CONTROL}px; }}
+QWidget#segmented {{ background: {p['inset']}; border: 1px solid {p['border']}; border-radius: {RADIUS_CONTROL}px; }}
 QWidget#segmented QPushButton {{
     background: transparent; border: none; border-radius: 4px; color: {p['text_secondary']};
     padding: 5px 12px;

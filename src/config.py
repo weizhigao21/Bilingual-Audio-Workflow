@@ -110,7 +110,10 @@ DEFAULT_CONFIG = {
         "streaming_threshold_minutes": 20,
         "enable_batch_parallel": True,
         "folder_prefix": True,
-        "channel_map": {"left": 155, "right": 25, "both": 135},
+        # 声道角度：新版为"分离度（度数 0–90）+ 居中偏置"两个语义参数
+        # （panning.py），旧的 channel_map 三角度仅在两个新键都缺失时迁移读取
+        "channel_separation": 45,
+        "channel_center_bias": 30,
         "metadata_enabled": True,
         "metadata_fields": {
             "title": True, "artist": True, "album": True,

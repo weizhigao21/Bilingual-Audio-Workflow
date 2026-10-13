@@ -3,13 +3,35 @@
 
 修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
 """
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QFontMetrics
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget
+    QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget
 )
-from PyQt6.QtCore import pyqtSignal
 
-from .settings_group import PathRow, SettingsGroup
+from ..steps.audio_utils.panning import (
+    CENTER_BIAS_DEFAULT, CENTER_BIAS_LABELS, SEPARATION_MAX,
+    angles_from_config, describe, params_from_config,
+)
+from ..ui_theme import FONT_AUX, FONT_FAMILY
+from .settings_group import PathRow, SegmentedControl, SettingsGroup
+
+# 分离度读数的"最宽可能"样例（偏转 90° 时左右角度取到 180°/0°），用于给标签定最小宽度。
+_READOUT_SAMPLE = "偏转 90° → 180° / 0°"
+
+
+def _readout_min_width() -> int:
+    """读数标签的最小宽度。
+
+    读数必须**完整可见**，所以按最宽文案算一个像素宽度钉住它。不能给它套
+    ``Ignored`` 尺寸策略——那样布局会忽略 sizeHint，而滑块（stretch=1）会把整行
+    吃光，读数只剩一条 1px 的竖线（v2.2.6 离屏实测：滑块沟槽一直画到 x≈662，
+    读数区仅剩 ~28px，文字被裁到只剩一个笔画）。
+    """
+    font = QFont(FONT_FAMILY)
+    font.setPixelSize(FONT_AUX)
+    return QFontMetrics(font).horizontalAdvance(_READOUT_SAMPLE) + 6
 
 
 class MixerConfigPanel(QWidget):
@@ -117,27 +139,46 @@ class MixerConfigPanel(QWidget):
         self.channel_detect_check.toggled.connect(self._save)
         volume.add_widget_row(self.channel_detect_check)
 
+        # 声道角度：一个「分离度」滑块 + 一个「原音居中时」三选一。
+        #
+        # 旧版是三个各自独立的 0–180° 数字框（channel_map.left/both/right），
+        # 用户实际总把它们调成 45–135° 的"软声像"——等于**手动把三个参数收敛成
+        # 了一个**；而 0°/180° 是单侧增益为 0（对侧完全听不到），检测器一旦判错
+        # 人声就整段消失在一边，这个区间本来就不该暴露给人手填。
+        # 参数语义与换算见 steps/audio_utils/panning.py。
         chan_box = QHBoxLayout()
-        chan_box.setSpacing(6)
-        chan_box.addWidget(QLabel("左:"))
-        self.angle_left = QSpinBox()
-        self.angle_left.setRange(0, 180)
-        self.angle_left.valueChanged.connect(self._save)
-        chan_box.addWidget(self.angle_left)
-        chan_box.addWidget(QLabel("中:"))
-        self.angle_both = QSpinBox()
-        self.angle_both.setRange(0, 180)
-        self.angle_both.valueChanged.connect(self._save)
-        chan_box.addWidget(self.angle_both)
-        chan_box.addWidget(QLabel("右:"))
-        self.angle_right = QSpinBox()
-        self.angle_right.setRange(0, 180)
-        self.angle_right.valueChanged.connect(self._save)
-        chan_box.addWidget(self.angle_right)
-        chan_box.addStretch(1)
+        chan_box.setSpacing(10)
+        self.sep_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sep_slider.setRange(0, int(SEPARATION_MAX))
+        self.sep_slider.setSingleStep(1)
+        self.sep_slider.setPageStep(15)
+        self.sep_slider.setTickInterval(15)
+        self.sep_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.sep_slider.setToolTip(
+            "检测到原音人声偏左/偏右时，配音放到**对侧**的偏转角。\n"
+            "0° = 始终居中；90° = 完全放到对侧（0°/180°，对侧完全听不到）。")
+        self.sep_slider.valueChanged.connect(self._on_separation_changed)
+        chan_box.addWidget(self.sep_slider, 1)
+        self.sep_readout = QLabel()
+        self.sep_readout.setProperty("role", "secondary")
+        self.sep_readout.setMinimumWidth(_readout_min_width())
+        self.sep_readout.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        chan_box.addWidget(self.sep_readout)
         chan_widget = QWidget()
         chan_widget.setLayout(chan_box)
-        volume.add_wide_row("声道角度", "0–180 度，仅声道检测启用时生效", chan_widget)
+        volume.add_wide_row(
+            "配音分离度", "原音人声偏左/偏右时，配音放到对侧的幅度", chan_widget)
+
+        self.center_segment = SegmentedControl([
+            (CENTER_BIAS_LABELS[bias], bias) for bias in (-30, 0, 30)
+        ])
+        self.center_segment.setToolTip(
+            "原音人声在中间、或检测不出声道时的配音落点。")
+        self.center_segment.current_changed.connect(lambda _v: self._save())
+        volume.add_row(
+            "原音居中时", "原音人声在中间、或检测不出声道时的配音位置",
+            self.center_segment)
 
         self.align_check = QCheckBox("起始对齐（对齐配音起拍点到原音频）")
         self.align_check.toggled.connect(self._save)
@@ -249,13 +290,28 @@ class MixerConfigPanel(QWidget):
             self.channels_combo.setEnabled(True)
         self._save()
 
+    def _refresh_separation_readout(self, value: int):
+        """把分离度换算成实际混音角度显示出来（滑块位置本身没有意义，角度才有）。"""
+        bias = self.center_segment.current_data()
+        if bias is None:
+            bias = CENTER_BIAS_DEFAULT
+        angles = angles_from_config({
+            "channel_separation": value, "channel_center_bias": bias})
+        self.sep_readout.setText(
+            f"偏转 {value}° → {angles['left']:.0f}° / {angles['right']:.0f}°")
+        self.sep_readout.setToolTip(describe(value, bias))
+
+    def _on_separation_changed(self, value: int):
+        self._refresh_separation_readout(value)
+        self._save()
+
     def _load_values(self):
         cfg = self.config.mixer_cfg
         widgets = [self.output_row.edit, self.format_combo, self.preset_combo,
                    self.bitrate_combo, self.sr_combo, self.channels_combo,
                    self.depth_combo, self.volume_spin,
                    self.auto_vol_combo, self.peak_combo, self.channel_detect_check,
-                   self.angle_left, self.angle_both, self.angle_right,
+                   self.sep_slider, self.center_segment,
                    self.align_check, self.content_align_check, self.resample_check,
                    self.suffix_check, self.folder_prefix_check,
                    self.output_prefix_check,
@@ -305,11 +361,11 @@ class MixerConfigPanel(QWidget):
             self.peak_combo.setCurrentIndex(max(0, self.peak_combo.findData(cfg.get("peak_mode", "peak"))))
             # 声道检测
             self.channel_detect_check.setChecked(cfg.get("channel_detect", True))
-            # 声道角度
-            cm = cfg.get("channel_map", {"left": 155, "right": 25, "both": 135})
-            self.angle_left.setValue(cm.get("left", 155))
-            self.angle_both.setValue(cm.get("both", 135))
-            self.angle_right.setValue(cm.get("right", 25))
+            # 声道角度（新版：分离度 + 居中偏置；旧 channel_map 三角度自动迁移）
+            sep_value, bias_value = params_from_config(cfg)
+            self.sep_slider.setValue(sep_value)
+            self.center_segment.set_current_data(bias_value)
+            self._refresh_separation_readout(sep_value)
             # 其他选项
             self.align_check.setChecked(cfg.get("align_onset", True))
             self.content_align_check.setChecked(cfg.get("content_alignment", False))
@@ -339,11 +395,11 @@ class MixerConfigPanel(QWidget):
         cfg["auto_volume"] = self.auto_vol_combo.currentData()
         cfg["peak_mode"] = self.peak_combo.currentData()
         cfg["channel_detect"] = self.channel_detect_check.isChecked()
-        cfg["channel_map"] = {
-            "left": self.angle_left.value(),
-            "both": self.angle_both.value(),
-            "right": self.angle_right.value(),
-        }
+        # 声道角度：保存两个语义参数。混音侧（step3 / stream_mixer）用
+        # angles_from_config() 把它们换算成 channel_map——面板与混音共用同一
+        # 个函数，避免"面板上看到的"和"实际混音用的"不是一套。
+        cfg["channel_separation"] = self.sep_slider.value()
+        cfg["channel_center_bias"] = self.center_segment.current_data()
         cfg["align_onset"] = self.align_check.isChecked()
         cfg["content_alignment"] = self.content_align_check.isChecked()
         cfg["high_quality_resample"] = self.resample_check.isChecked()

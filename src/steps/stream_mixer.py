@@ -6,7 +6,10 @@ import tempfile
 
 from pydub import AudioSegment
 
-from .audio_utils import detect_angles_parallel, get_mix_audio_files, mix_with_numpy
+from .audio_utils import (
+    angles_from_config, detect_angles_parallel, get_mix_audio_files,
+    mix_with_numpy,
+)
 from .audio_utils.ffmpeg_utils import (
     decode_audio_to_pcm, export_pcm_file, export_pcm_wav,
 )
@@ -58,7 +61,7 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
                         log("[音频混音] 检测声道位置...")
                         angles = detect_angles_parallel(
                             original, clips,
-                            cfg.get("channel_map", {"left": 155, "right": 25, "both": 135}),
+                            angles_from_config(cfg),
                             max_workers=cfg.get("thread_count", 4),
                         )
                     progress(25)

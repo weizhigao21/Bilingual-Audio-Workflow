@@ -16,20 +16,24 @@ from .common import _natural_sort_key, STATUS_TEXT
 
 # 状态圆点颜色（取自主题色板，避免同一语义出现两种绿/橙）
 _STATUS_DOT_COLORS = {
-    "pending": "#c9c9cc",
+    "pending": "#a8a8ae",
     "running": PALETTE["accent"],
     "done": PALETTE["ready"],
     "failed": PALETTE["error"],
-    "skipped": "#85858a",
+    "skipped": PALETTE["text_label"],
 }
 _ROW_HEIGHT = 50          # 紧凑列表行高（UI_STYLE：模型/音频列表行高基准）
 _DOT_SIZE = 8
-_TEXT_COLOR = QColor("#18181a")
-_SUBTITLE_COLOR = QColor("#6b6b6e")
-_META_COLOR = QColor("#85858a")
-_SELECTED_BG = QColor("#f1f1f1")
-_HOVER_BG = QColor("#fafafa")
+_TEXT_COLOR = QColor(PALETTE["text"])
+_SUBTITLE_COLOR = QColor(PALETTE["text_secondary"])
+_META_COLOR = QColor(PALETTE["text_label"])
+# 选中/悬停必须与侧栏底色（PALETTE["sidebar"]）拉开明度差：侧栏加深后，
+# 旧的 #f1f1f1 比侧栏底还亮，"选中"反而像高光，等于没有选中反馈。
+_SELECTED_BG = QColor(PALETTE["selected"])
+_HOVER_BG = QColor(PALETTE["row_hover"])
 # 层级连接线（├ / └ 肘线 + 祖先竖线）与展开箭头
+# 导引线：既要在侧栏底（#fbfbfc）上看清，又要与行悬停/选中底色拉开距离
+# （树连线守卫按 ±18 颜色容差找线，底色太近会把空白误判成线条）。
 _GUIDE_COLOR = QColor("#d2d2d7")   # 原 #e4e4e7 太淡，看不出从属关系
 _CHEVRON_COLOR = QColor("#a2a2a8")
 _CHEVRON_SIZE = 8

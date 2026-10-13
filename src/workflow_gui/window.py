@@ -146,7 +146,7 @@ class WorkflowMainWindow(
         center = QWidget()
         center.setObjectName("centerPane")
         layout = QVBoxLayout(center)
-        layout.setContentsMargins(20, 14, 20, 10)
+        layout.setContentsMargins(20, 16, 20, 12)
         layout.setSpacing(10)
 
         # 标题行：当前条目名称（14px）+ 右对齐来源（12px，中间省略 + 全路径 tooltip）
@@ -173,6 +173,14 @@ class WorkflowMainWindow(
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
+        # 页头分隔线：区隔"固定的标题/工具栏"与"可滚动的卡片区"。
+        # 少了这条线，工具栏与第一张步骤卡同色相邻，看不出分区（用户反馈
+        # "区域区分不明显"）。
+        header_rule = QWidget()
+        header_rule.setObjectName("headerRule")
+        header_rule.setFixedHeight(1)
+        layout.addWidget(header_rule)
+
         # 滚动内容区：步骤卡片 + 日志卡片（页面整体滚动）
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -181,8 +189,9 @@ class WorkflowMainWindow(
         content = QWidget()
         content.setObjectName("centerScrollContent")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 2, 0, 2)
-        content_layout.setSpacing(10)
+        # 卡片间距略放大（10 → 12）：灰底露出更多，卡片之间的"缝"才看得清
+        content_layout.setContentsMargins(0, 4, 0, 4)
+        content_layout.setSpacing(12)
 
         # 三个步骤面板（白色卡片）
         self.step_panels = {}

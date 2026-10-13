@@ -28,6 +28,7 @@ from .audio_utils import (
     export_audio_ffmpeg,
     resample_audio,
     clear_mix_cache,
+    angles_from_config,
 )
 from .audio_utils.ffmpeg_utils import probe_audio
 from .stream_mixer import mix_streaming_task
@@ -177,9 +178,9 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         if cfg.get("channel_detect", True):
             _log("[音频混音] 检测声道位置...")
             _progress(20)
-            channel_map = cfg.get(
-                "channel_map", {"left": 155, "right": 25, "both": 135}
-            )
+            # 声道→角度映射由 panning 统一算出（分离度 + 居中偏置），
+            # 面板保存与这里必须走同一个函数，否则"看到的"和"混音的"不是一套。
+            channel_map = angles_from_config(cfg)
             per_file_angles = detect_angles_parallel(
                 original_audio, audio_files, channel_map,
                 max_workers=cfg.get("thread_count", 4)

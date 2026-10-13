@@ -40,6 +40,8 @@ class StepPanel(QFrame):
         super().__init__(parent)
         self.step_number = step_number
         self.setProperty("card", "true")
+        # 左缘状态色条由 QSS 按 state 属性着色（见 ui_theme：QFrame[card][state=...]）
+        self.setProperty("state", STEP_PENDING)
         self._build_ui(title)
 
     def _build_ui(self, title: str):
@@ -141,6 +143,9 @@ class StepPanel(QFrame):
         self.status_label.setProperty("status", status)
         # 动态属性变化后需要重新求值 QSS
         repolish(self.status_label)
+        # 卡片左缘状态色条同步（同样需要 repolish，否则 QSS 不会重算）
+        self.setProperty("state", status)
+        repolish(self)
 
     def set_progress(self, value: int, maximum: int = 100):
         self.progress.setRange(0, maximum)

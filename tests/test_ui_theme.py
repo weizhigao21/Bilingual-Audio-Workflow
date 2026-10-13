@@ -12,9 +12,11 @@
 - 滚轮守卫把滚轮事件转成页面滚动（交互稳定性第 3 条）
 - 输出路径 RichText 可点击链接 + HTML 转义 + 单行省略 + tooltip 完整内容
 - 勾选图标资源存在（.spec datas 遗漏会导致运行时 QSS 引用为空）
+- 打包后的资源目录解析（frozen 下 datas 在 _MEIPASS/_internal，不是 exe 同级）
 """
 import ast
 import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +35,7 @@ from PyQt6.QtTest import QTest
 
 from src import ui_theme
 from src.task_manager import (
-    STEP_DONE, STEP_FAILED, STEP_RUNNING, STEP_SKIPPED, TaskInfo,
+    STEP_DONE, STEP_FAILED, STEP_PENDING, STEP_RUNNING, STEP_SKIPPED, TaskInfo,
 )
 from src.ui_theme import (
     FONT_AUX, FONT_BODY, FONT_FAMILY, FONT_SECTION,
@@ -70,11 +72,38 @@ class ThemeConstantTests(unittest.TestCase):
 
     def test_palette_matches_style_spec(self):
         self.assertEqual(PALETTE["bg"], "#ffffff")
-        self.assertEqual(PALETTE["sidebar"], "#fafafa")
+        self.assertEqual(PALETTE["canvas"], "#ffffff")
+        self.assertEqual(PALETTE["sidebar"], "#fbfbfc")
         self.assertEqual(PALETTE["text"], "#18181a")
-        self.assertEqual(PALETTE["separator"], "#eeeeee")
+        self.assertEqual(PALETTE["separator"], "#ececf0")
+        self.assertEqual(PALETTE["border"], "#d4d4da")
         self.assertEqual(PALETTE["accent"], "#e0651c")
         self.assertEqual(PALETTE["focus"], "#d9ac8c")
+
+    def test_region_borders_are_visible_on_white(self):
+        """分区靠"看得见的边界线"，边界线必须与白底拉开对比。
+
+        分区策略变过一次：先按明度分层（灰底 + 白卡），用户反馈"太丑"；
+        改为纯白表面 + 边界线。但线必须真的看得见——旧的 #eeeeee 与白底
+        只差 17 灰阶，1x 屏上等于没有边界，那正是"区域区分不明显"的根源。
+        """
+        def _lum(hex_color: str) -> float:
+            r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        white = _lum(PALETTE["bg"])
+        self.assertEqual(PALETTE["canvas"], PALETTE["bg"],
+                         "线框分区下工作区底应与卡片同为白")
+        self.assertGreaterEqual(
+            white - _lum(PALETTE["border"]), 25,
+            "区域边界线太淡，白底上看不出分界（旧 #eeeeee 只差 17）")
+        self.assertGreaterEqual(
+            white - _lum(PALETTE["separator"]), 8,
+            "二级分隔线太淡，卡片内行/项之间分不开")
+        # 内凹底（分段容器、状态药丸）必须与白前景拉开，否则"选中项"看不出来
+        self.assertGreaterEqual(
+            white - _lum(PALETTE["inset"]), 10,
+            "内凹底色太接近白，分段按钮的选中态会消失")
 
     def test_typography_and_layout_sizes(self):
         self.assertEqual((FONT_TITLE, FONT_SECTION, FONT_BODY, FONT_AUX),
@@ -97,6 +126,8 @@ class ThemeConstantTests(unittest.TestCase):
             # 侧栏品牌层级、统一选择窗选项按钮、日志卡、工具栏分隔线
             'QLabel[role="brand"]', 'QPushButton[kind="option"]',
             'QTextEdit#logView', 'QWidget#toolbarDivider',
+            # 页头分隔线 + 步骤卡状态色条
+            'QWidget#headerRule', 'QFrame[card="true"][state="running"]',
         ):
             self.assertIn(fragment, qss, f"QSS 缺少选择器 {fragment}")
         # 侧栏品牌必须大于正文（层级：17px vs 13px）
@@ -710,7 +741,8 @@ class StyledBackgroundTests(unittest.TestCase):
         group.add_row("行标题", "行说明", QLabel("控件"))
         self.assertTrue(group.testAttribute(
             Qt.WidgetAttribute.WA_StyledBackground))
-        self.assertEqual(self._border_pixel(group), PALETTE["separator"])
+        # 卡片边框统一用 border（比分隔线更深一档），灰底上才看得见框
+        self.assertEqual(self._border_pixel(group), PALETTE["border"])
 
     def test_segmented_control_container_is_painted(self):
         control = SegmentedControl([("A", "a"), ("B", "b")])
@@ -736,6 +768,59 @@ class StyledBackgroundTests(unittest.TestCase):
         for cls in (SettingsGroup, SegmentedControl, ToastPopup):
             self.assertTrue(issubclass(cls, StyledWidget),
                             f"{cls.__name__} 应继承 StyledWidget")
+
+
+class StepCardStateStripeTests(unittest.TestCase):
+    """步骤卡左缘 3px 状态色条：一眼看出"现在在哪一步"。
+
+    灰阶分层解决"区域分不清"，色条解决"不知道看哪里"——三张步骤卡外观
+    完全一致时，用户只能读右上角的小药丸才知道进度。色条宽度恒定 3px
+    （含 pending 用中性色），状态切换不产生宽度跳动。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyleSheet(build_stylesheet())
+
+    def _stripe(self, status: str) -> str:
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        host.resize(520, 320)
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(20, 20, 20, 20)
+        panel = StepPanel(2, "语音生成")
+        self.addCleanup(panel.deleteLater)
+        layout.addWidget(panel)
+        layout.addStretch(1)
+        host.show()
+        panel.set_status(status)
+        for _ in range(3):
+            self.app.processEvents()
+        image = host.grab().toImage()
+        origin = panel.mapTo(host, QPoint(0, 0))
+        # 左边界往内 1px 正落在 3px 状态色条上
+        return QColor(image.pixel(origin.x() + 1,
+                                  origin.y() + panel.height() // 2)).name()
+
+    def test_stripe_follows_step_status(self):
+        for status, expected in (
+            (STEP_PENDING, PALETTE["border"]),
+            (STEP_RUNNING, PALETTE["accent"]),
+            (STEP_DONE, PALETTE["ready"]),
+            (STEP_FAILED, PALETTE["error"]),
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(self._stripe(status), expected)
+
+    def test_stripe_width_is_pinned_for_every_status(self):
+        """四条规则宽度都必须是 3px，否则切状态时会横向跳动。"""
+        qss = build_stylesheet()
+        for status in ("pending", "running", "done", "failed", "skipped"):
+            self.assertIn(
+                f'QFrame[card="true"][state="{status}"] '
+                '{ border-left: 3px solid',
+                qss, f"{status} 缺少 3px 状态色条规则")
 
 
 class InlineStyleTests(unittest.TestCase):
@@ -918,6 +1003,70 @@ class IndicatorPaintTests(unittest.TestCase):
         self.assertNotIn("url(file:///", qss)
 
 
+class BundledResourcePathTests(unittest.TestCase):
+    """打包（frozen）后勾选图标仍必须能被 QSS 找到。
+
+    回归事故（用户反馈"这里没有打勾，还有好多地方没有打勾"）：**打包版**全屏
+    勾选框都退化成纯黑方块。根因不在 QSS，而在 ``ui_theme._resource_dir()`` 用
+    ``os.path.dirname(sys.executable)`` 拼资源目录——PyInstaller 6 起 onedir 把
+    ``.spec`` 的 datas 放进 ``_internal/``（正指向 ``sys._MEIPASS``），exe 同级
+    目录下没有 ``resources/``，于是 ``resource_url('check.png')`` **静默返回空串**
+    （只读资源没有兜底），QSS 里少掉 ``image: url(...)``。
+
+    该缺陷**只在打包版出现**：源码运行与离屏测试都察觉不到（``__file__`` 在源码
+    下是对的），所以必须显式模拟 frozen 环境才能守住。
+    """
+
+    def _pretend_frozen(self, meipass: str) -> None:
+        """把进程伪装成打包环境，用例结束后精确还原（原先没有的属性删掉）。"""
+        missing = object()
+        saved = {key: getattr(sys, key, missing)
+                 for key in ("frozen", "_MEIPASS", "executable")}
+        sys.frozen = True
+        sys._MEIPASS = meipass
+
+        def restore():
+            for key, value in saved.items():
+                if value is missing:
+                    if hasattr(sys, key):
+                        delattr(sys, key)
+                else:
+                    setattr(sys, key, value)
+        self.addCleanup(restore)
+
+    def test_resource_dir_uses_meipass_when_frozen(self):
+        """onedir：datas 在 ``_MEIPASS``（``_internal/``），必须优先用它。"""
+        with TemporaryDirectory() as tmp:
+            ui_dir = Path(tmp) / "resources" / "ui"
+            ui_dir.mkdir(parents=True)
+            (ui_dir / "check.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            self._pretend_frozen(tmp)
+
+            self.assertEqual(
+                os.path.normcase(ui_theme._resource_dir()),
+                os.path.normcase(str(Path(tmp) / "resources")),
+                "_MEIPASS 下有 resources/ 时必须用它；退回 exe 同级目录会让"
+                "resource_url() 返回空串，勾选框退化成纯黑方块")
+            self.assertTrue(resource_url("check.png"),
+                            "打包后 check.png 解析为空 → 所有勾选框都不见勾")
+
+    def test_resource_dir_falls_back_to_exe_dir(self):
+        """老式布局：datas 与 exe 同级时仍要能找到资源。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "resources" / "ui").mkdir(parents=True)
+            (root / "resources" / "ui" / "check.png").write_bytes(b"x")
+            empty_meipass = root / "internal"
+            empty_meipass.mkdir()
+            self._pretend_frozen(str(empty_meipass))
+            sys.executable = str(root / "app.exe")
+
+            self.assertEqual(
+                os.path.normcase(ui_theme._resource_dir()),
+                os.path.normcase(str(root / "resources")),
+                "_MEIPASS 下没有 resources/ 时，应回退到 exe 同级目录")
+
+
 class StatusGreenTests(unittest.TestCase):
     """「已完成」必须是明确的绿色（截图反馈：原来偏灰看不出完成）。"""
 
@@ -944,7 +1093,9 @@ class StatusGreenTests(unittest.TestCase):
 class TreeConnectorTests(unittest.TestCase):
     """任务树必须有横向肘线（├ / └），光有竖线看不出从属关系。"""
 
-    GUIDE = QColor("#d2d2d7")
+    # 与实现同源：硬编码色值会在调色板变动时静默失配（守卫找不到线，
+    # 报"竖线断开"这种指错方向的失败）
+    GUIDE = QColor(_GUIDE_COLOR)
 
     @classmethod
     def setUpClass(cls):
@@ -1088,6 +1239,29 @@ class TreeConnectorTests(unittest.TestCase):
         below_last = self._guide_span(column, last_rect.center().y() + 2,
                                       last_rect.bottom())
         self.assertEqual(below_last, 0, "末子画成了 ├，应止于肘点（└）")
+
+    def test_guide_color_stays_clear_of_surface_colors(self):
+        """导引线色必须与侧栏各表面色拉开距离（每通道 ≥19）。
+
+        ``_is_guide`` 按 ±18 容差找线条像素；行悬停/选中底色一旦落进这个
+        容差带，非末子的空白区也会被当成"竖线"，└ 的守卫就误报（本次把
+        悬停色从 #fafafa 改成 #e3e3e8 时正撞上 #d2d2d7 的导引线）。
+        """
+        from src.widgets.task_list import _STATUS_DOT_COLORS
+        guide = QColor(_GUIDE_COLOR)
+        for name, color in (
+            ("侧栏底", QColor(PALETTE["sidebar"])),
+            ("行悬停", QColor(PALETTE["row_hover"])),
+            ("行选中", QColor(PALETTE["selected"])),
+            ("等待状态点", QColor(_STATUS_DOT_COLORS["pending"])),
+        ):
+            gap = min(abs(color.red() - guide.red()),
+                      abs(color.green() - guide.green()),
+                      abs(color.blue() - guide.blue()))
+            self.assertGreaterEqual(
+                gap, 19,
+                f"{name} {color.name()} 与导引线 {guide.name()} 太近，"
+                "会被树连线守卫误判成线条")
 
     def test_parent_spine_is_continuous(self):
         """父节点下方必须是一条连续竖线，子项用横线挂在它上面。
