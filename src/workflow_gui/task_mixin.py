@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """主窗口 Mixin：任务/文件夹组选择、面板刷新与任务管理。"""
 import os
+
 from PyQt6.QtWidgets import QMessageBox
 
 from ..task_manager import (
@@ -63,8 +64,15 @@ class TaskMixin:
         done = group.done_count()
         total = len(group.tasks)
         self.current_task_label.setText(
-            f"文件夹：{group.group_name}　({done}/{total} 完成 · {total} 个音频)"
-        )
+            f"文件夹：{group.group_name}（{done}/{total}）")
+        subtitle = getattr(self, "current_task_subtitle", None)
+        if subtitle is not None:
+            failed = sum(1 for t in group.tasks if t.step_status(1) == STEP_FAILED
+                         or t.step_status(2) == STEP_FAILED
+                         or t.step_status(3) == STEP_FAILED)
+            # 右侧只放路径（全文进 tooltip）；失败数作为前缀高优先级提示
+            prefix = f"{failed} 个失败 · " if failed else ""
+            subtitle.setText(prefix + group.folder_path)
         for step in (1, 2, 3):
             panel = self.step_panels[step]
             status = self._group_step_status(group, step)
@@ -74,6 +82,7 @@ class TaskMixin:
             panel.progress.setValue(int(group.progress() * 100))
             panel.start_btn.setEnabled(True)
             panel.stop_btn.setEnabled(False)
+        self._refresh_entry_buttons()
 
     @staticmethod
     def _group_step_status(group: TaskGroup, step: int) -> str:
@@ -96,20 +105,29 @@ class TaskMixin:
             self._current_group = None
             self._selected_folder = None
             self.current_task_label.setText("未选择任务")
+            subtitle = getattr(self, "current_task_subtitle", None)
+            if subtitle is not None:
+                subtitle.setText("选择左侧任务，或添加视频/音频文件开始")
+                subtitle.setToolTip("")
             for panel in self.step_panels.values():
                 panel.reset()
+            self._refresh_entry_buttons()
             return
         self._current_group = None
         self._selected_folder = None
-        self.current_task_label.setText(
-            f"当前任务：{task.source_name}  (创建于 {task.created_at})"
-        )
+        self.current_task_label.setText(f"当前任务：{task.source_name}")
+        self.current_task_label.setToolTip(
+            f"创建于 {task.created_at}\n{task.source_path}")
+        subtitle = getattr(self, "current_task_subtitle", None)
+        if subtitle is not None:
+            subtitle.setText(task.source_path)
         self._refresh_step_panels(task)
 
     def _on_task_updated(self, task: TaskInfo):
         self.task_list.update_task_item(task)
         if self.task_queue.current and self.task_queue.current.task_id == task.task_id:
             self._refresh_step_panels(task)
+            self._refresh_entry_buttons()
         elif (self._current_group and not self._batch_executor
               and any(t.task_id == task.task_id for t in self._current_group.tasks)):
             # 组内任务状态变化时刷新组汇总（批量执行中不刷新，避免干扰进度显示）
@@ -125,7 +143,7 @@ class TaskMixin:
             output = task.step1_output if step == 1 else (
                 task.step2_output if step == 2 else task.step3_output
             )
-            panel.set_output(output or "")
+            panel.set_output(output or "", {1: "字幕", 2: "配音", 3: "成品"}[step])
 
             # 进度条按步骤状态重置，避免残留上一次运行的值：
             # 完成/跳过 → 100%；待处理/失败 → 0%；运行中 → 保持实时进度（由进度信号驱动）
@@ -152,6 +170,27 @@ class TaskMixin:
             # 但允许通过"重跑"来取消跳过
             panel.start_btn.setEnabled(not running and ready and not skipped)
             panel.stop_btn.setEnabled(running)
+        # 条目级按钮（添加字幕/配音）随步骤运行状态联动
+        self._refresh_entry_buttons()
+
+    # ---------- 工具栏条目级按钮与底部栏同步 ----------
+    def _refresh_entry_buttons(self):
+        """按当前选择刷新工具栏「添加字幕/添加配音」的可用性。
+
+        仅选中具体任务且字幕/配音步骤未运行时可用；文件夹组或无选中时禁用。
+        """
+        buttons = [b for b in (getattr(self, "add_subtitle_btn", None),
+                               getattr(self, "add_mix_btn", None))
+                   if b is not None]
+        if not buttons:
+            return
+        task = self.task_queue.current if self.task_queue else None
+        enabled = bool(task is not None
+                       and task.step1_status != STEP_RUNNING
+                       and task.step2_status != STEP_RUNNING)
+        for button in buttons:
+            button.setEnabled(enabled)
+
 
     # ========== 任务管理 ==========
     def _on_edit_metadata(self, task_id: str):

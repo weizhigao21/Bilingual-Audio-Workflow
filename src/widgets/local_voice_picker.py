@@ -62,7 +62,7 @@ class VoicePicker(QWidget):
         layout.addWidget(self.refresh_button, 1, 2)
         self.hint = QLabel("连接后选择已保存的音色，再按上方批量设置生成。")
         self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color: #666; font-size: 11px;")
+        self.hint.setProperty("role", "secondary")
         layout.addWidget(self.hint, 2, 0, 1, 3)
         self.clear_voices()
 

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """主窗口 Mixin：批量执行与全部清空。"""
-from PyQt6.QtWidgets import QMessageBox, QLabel, QHBoxLayout
+from PyQt6.QtWidgets import QMessageBox, QLabel
 
 
 class BatchMixin:
@@ -21,16 +21,16 @@ class BatchMixin:
             QMessageBox.warning(self, "提示", f"步骤 {running} 正在运行中，请先停止。")
             return
 
-        # 步骤选择对话框
         from PyQt6.QtWidgets import (
-            QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox,
-            QComboBox, QGroupBox as QDlgGroupBox
+            QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox
         )
+        from ..widgets.settings_group import SettingsGroup, SegmentedControl
         dialog = QDialog(self)
         dialog.setWindowTitle("批量执行 - 选择步骤")
-        dialog.setMinimumWidth(400)
+        dialog.setMinimumWidth(440)
         dlg_layout = QVBoxLayout(dialog)
-        dlg_layout.addWidget(QLabel(f"将对 {len(self.task_queue.tasks)} 个任务批量执行以下步骤："))
+        dlg_layout.setContentsMargins(20, 20, 20, 16)
+        dlg_layout.setSpacing(12)
 
         whisper_available = self.config.is_configured()
         if not whisper_available:
@@ -40,9 +40,11 @@ class BatchMixin:
                 "已有字幕的任务仍可使用语音→混音流水线。"
             )
             notice.setWordWrap(True)
-            notice.setStyleSheet("color: #b36b00;")
+            notice.setProperty("role", "error")
             dlg_layout.addWidget(notice)
 
+        group = SettingsGroup("执行步骤",
+                              f"将对 {len(self.task_queue.tasks)} 个任务批量执行以下步骤")
         step_names = {1: "步骤1: 字幕提取", 2: "步骤2: 语音生成", 3: "步骤3: 音频混音"}
         checks = {}
         for step in (1, 2, 3):
@@ -52,31 +54,38 @@ class BatchMixin:
                 cb.setChecked(False)
                 cb.setEnabled(False)
                 cb.setToolTip("请通过工具栏的“配置”设置含 infer.exe 的字幕提取程序目录。")
-            dlg_layout.addWidget(cb)
+            group.add_widget_row(cb)
             checks[step] = cb
+        dlg_layout.addWidget(group)
 
-        # 执行顺序选择
-        order_group = QDlgGroupBox("执行顺序")
-        order_layout = QHBoxLayout(order_group)
-        order_layout.addWidget(QLabel("模式:"))
-        order_combo = QComboBox()
-        order_combo.addItem(
-            "流水线：字幕就绪即语音→混音（推荐）" if whisper_available
-            else "流水线：已有字幕→语音→混音", "pipeline"
+        order_group = SettingsGroup("执行顺序")
+        order_combo = SegmentedControl([
+            ("流水线", "pipeline"),
+            ("按步骤", "by_step"),
+            ("按任务", "by_task"),
+        ])
+        order_desc = QLabel(
+            "流水线：字幕就绪即语音→混音（推荐）\n"
+            "按步骤：先全部字幕→再全部语音→再全部混音\n"
+            "按任务：每个任务跑完三步再跑下一个"
         )
-        order_combo.addItem("按步骤：先全部字幕→再全部语音→再全部混音", "by_step")
-        order_combo.addItem("按任务：每个任务跑完三步再跑下一个", "by_task")
-        order_layout.addWidget(order_combo, 1)
+        order_desc.setWordWrap(True)
+        order_desc.setProperty("role", "muted")
+        order_group.add_wide_row("模式", "", order_combo)
+        order_group.add_widget_row(order_desc)
         dlg_layout.addWidget(order_group)
 
         hint = QLabel("已完成的步骤会自动跳过；失败的任务会跳过后续步骤继续下一个。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray; font-size: 11px;")
+        hint.setProperty("role", "muted")
         dlg_layout.addWidget(hint)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("开始执行")
+        btns.button(QDialogButtonBox.StandardButton.Ok).setProperty("kind", "primary")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         btns.accepted.connect(dialog.accept)
         btns.rejected.connect(dialog.reject)
         dlg_layout.addWidget(btns)
@@ -94,7 +103,7 @@ class BatchMixin:
         if not self._check_subtitles_available(self.task_queue.tasks, steps):
             return
 
-        order = order_combo.currentData()
+        order = order_combo.current_data()
 
         # 启动批量执行
         from ..steps.batch_executor import BatchExecutor
@@ -136,12 +145,16 @@ class BatchMixin:
             self._batch_executor.stop()
 
     def _on_batch_progress(self, task_idx: int, total: int, step: int):
-        if step == 0:
-            self.status_bar_label.setText(f"批量: 任务 {task_idx + 1}/{total}")
-        else:
-            self.status_bar_label.setText(f"批量: 任务 {task_idx + 1}/{total} 步骤{step}")
-            # 步骤进度条由 step_progress_signal 驱动（任务内进度 / 任务间累计进度），
-            # 不再在每任务开始时重置为 0，避免累计进度被清零
+        """批量进度：底栏移除后改为"每进入一个任务记一行日志"。
+
+        步骤内部进度由各步骤卡的 3px 进度条呈现（step_progress_signal 驱动），
+        这里只在任务序号变化时落一行，避免每一步刷屏。
+        """
+        if step != 0 and task_idx == getattr(self, "_last_batch_idx", None):
+            return
+        self._last_batch_idx = task_idx
+        suffix = f" 步骤{step}" if step else ""
+        self._append_log(f"[批量] 任务 {task_idx + 1}/{total}{suffix}")
 
     def _on_batch_task_started(self, task_id: str):
         task = self.task_queue.get_task(task_id)
@@ -166,7 +179,7 @@ class BatchMixin:
             self._refresh_step_panels(self.task_queue.current)
         elif self._current_group:
             self._show_group_summary(self._current_group)
-        self.status_bar_label.setText("就绪")
+        self._show_toast(f"批量执行完成：成功 {success} · 失败 {fail} · 跳过 {skipped}")
         # 批量完成后，统一重命名文件夹导入的源文件夹
         if self.config.mixer_cfg.get("folder_prefix", True):
             self._rename_batch_folders()

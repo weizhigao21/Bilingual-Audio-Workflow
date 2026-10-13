@@ -2,12 +2,13 @@
 """混音成品信息编辑器；重封装在后台线程进行。"""
 import os
 
-from PyQt6.QtCore import QThread
+from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
     QMessageBox, QTextEdit, QVBoxLayout,
 )
 
+from ..ui_theme import repolish
 from ..version import APP_VERSION
 
 
@@ -48,8 +49,17 @@ class MetadataDialog(QDialog):
 
         tags = read_editable_tags(self.output_path, task.source_name, task)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(os.path.basename(self.output_path)))
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(14)
+
+        name_label = QLabel(os.path.basename(self.output_path))
+        name_label.setProperty("role", "section")
+        layout.addWidget(name_label)
+
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         self.title_edit = QLineEdit(tags["title"])
         self.artist_edit = QLineEdit(tags["artist"])
         self.album_edit = QLineEdit(tags["album"])
@@ -74,16 +84,27 @@ class MetadataDialog(QDialog):
                 "此格式不提供可靠的通用标签；信息会保存在工作区任务记录中。"
             )
         self.status_label.setWordWrap(True)
+        self.status_label.setProperty("role", "muted")
         layout.addWidget(self.status_label)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
-        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        save_button = self.buttons.button(QDialogButtonBox.StandardButton.Save)
+        save_button.setText("保存")
+        save_button.setProperty("kind", "primary")
+        save_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_button = self.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel_button.setText("取消")
+        cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.buttons.accepted.connect(self._start_save)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
+
+    def _set_status(self, text: str, role: str = "muted"):
+        self.status_label.setText(text)
+        self.status_label.setProperty("role", role)
+        repolish(self.status_label)
 
     def _start_save(self):
         if self._worker is not None:
@@ -97,7 +118,7 @@ class MetadataDialog(QDialog):
         self._worker = _MetadataEditWorker(self.output_path, tags, self.task, self)
         self._worker.finished.connect(self._on_save_finished)
         self.buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(False)
-        self.status_label.setText("正在保存成品信息，请稍候…")
+        self._set_status("正在保存成品信息，请稍候…")
         self._worker.start()
 
     def _on_save_finished(self):
@@ -110,7 +131,7 @@ class MetadataDialog(QDialog):
             super().reject()
         elif error:
             self.buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
-            self.status_label.setText("保存失败，原成品已保留。")
+            self._set_status("保存失败，原成品已保留。", role="error")
             QMessageBox.warning(self, "保存成品信息失败", error)
         else:
             if warning:
@@ -121,6 +142,6 @@ class MetadataDialog(QDialog):
         if self._worker is not None:
             self._close_when_finished = True
             self._worker.stop()
-            self.status_label.setText("正在取消，请稍候…")
+            self._set_status("正在取消，请稍候…")
             return
         super().reject()

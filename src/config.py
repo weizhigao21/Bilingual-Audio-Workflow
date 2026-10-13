@@ -14,9 +14,12 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFileDialog, QMessageBox, QGroupBox, QFormLayout,
-    QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox
+    QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QWidget
 )
 from PyQt6.QtCore import Qt
+
+from .ui_theme import repolish
+from .widgets.settings_group import SettingsGroup
 
 
 def get_base_path():
@@ -244,61 +247,87 @@ class SetupDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
 
+        # 标题层级与 SettingsDialog 一致：23px 标题 + 12px 说明
+        title = QLabel("首次配置")
+        title.setProperty("role", "title")
+        layout.addWidget(title)
         hint = QLabel("请指定字幕提取项目的路径，也可以跳过，稍后通过工具栏的“配置”补充。")
         hint.setWordWrap(True)
+        hint.setProperty("role", "muted")
         layout.addWidget(hint)
 
-        # 字幕提取项目路径
+        group = SettingsGroup(
+            "路径",
+            "字幕提取项目需包含 infer.exe；工作区目录用于存放全部任务的中间产物与成品。",
+        )
         self.whisper_edit = self._add_path_row(
-            layout, "字幕提取项目 (含 infer.exe)：",
+            group, "字幕提取项目 (含 infer.exe)：",
             "whisper_dir", is_file=False
         )
-
-        # workspace 路径
         self.workspace_edit = self._add_path_row(
-            layout, "工作区目录 (任务输出根目录)：",
+            group, "工作区目录 (任务输出根目录)：",
             "workspace_dir", is_file=False
         )
+        layout.addWidget(group)
 
-        # 按钮区
+        # 校验结果紧贴路径行下方（就近说明原因，而不是飘在按钮之后）
+        self._status_label = QLabel("")
+        self._status_label.setWordWrap(True)
+        layout.addWidget(self._status_label)
+
+        # 按钮区：主操作 + 取消靠右，"验证路径"作为次要文字按钮附在其左侧
         btn_layout = QHBoxLayout()
-        verify_btn = QPushButton("验证路径")
-        verify_btn.clicked.connect(self._verify_all)
-        btn_layout.addWidget(verify_btn)
         btn_layout.addStretch()
 
+        verify_btn = QPushButton("验证路径")
+        verify_btn.setProperty("kind", "text")
+        verify_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        verify_btn.clicked.connect(self._verify_all)
+        btn_layout.addWidget(verify_btn)
+
         ok_btn = QPushButton("保存并开始")
+        ok_btn.setProperty("kind", "primary")
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         ok_btn.clicked.connect(self._on_accept)
         cancel_btn = QPushButton("取消")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
-
-        self._status_label = QLabel("")
-        self._status_label.setWordWrap(True)
-        layout.addWidget(self._status_label)
 
         skip_hint = QLabel(
             "跳过后字幕提取及完整自动流水线不可用，需要自行准备字幕。"
             "可通过“+ 添加字幕”关联，或将同名字幕放在音频旁，再生成语音和混音。"
         )
         skip_hint.setWordWrap(True)
+        skip_hint.setProperty("role", "muted")
         layout.addWidget(skip_hint)
         self.skip_btn = QPushButton("跳过字幕提取，进入主界面")
+        self.skip_btn.setProperty("kind", "text")
+        self.skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.skip_btn.clicked.connect(self._on_skip)
-        layout.addWidget(self.skip_btn)
+        skip_row = QHBoxLayout()
+        skip_row.addWidget(self.skip_btn)
+        skip_row.addStretch()
+        layout.addLayout(skip_row)
 
-    def _add_path_row(self, parent_layout, label_text, key, is_file=False) -> QLineEdit:
-        row = QHBoxLayout()
-        row.addWidget(QLabel(label_text))
+    def _add_path_row(self, group, label_text, key, is_file=False) -> QLineEdit:
+        """向设置分组卡片追加一行“标签 + 路径输入 + 浏览”。"""
         edit = QLineEdit()
-        row.addWidget(edit, 1)
         browse_btn = QPushButton("浏览...")
+        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         browse_btn.clicked.connect(lambda: self._browse(edit, is_file))
+        wrapper = QWidget()
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(edit, 1)
         row.addWidget(browse_btn)
-        parent_layout.addLayout(row)
+        group.add_wide_row(label_text, "", wrapper)
         return edit
 
     def _browse(self, edit: QLineEdit, is_file: bool):
@@ -326,12 +355,16 @@ class SetupDialog(QDialog):
         if not workspace:
             errors.append("  - workspace_dir: 未指定工作区目录")
         if errors:
-            self._status_label.setText("验证失败：\n" + "\n".join(errors))
-            self._status_label.setStyleSheet("color: red;")
+            self._set_status("验证失败：\n" + "\n".join(errors), ok=False)
             return False
-        self._status_label.setText("验证通过！")
-        self._status_label.setStyleSheet("color: green;")
+        self._set_status("验证通过！", ok=True)
         return True
+
+    def _set_status(self, text: str, ok: bool):
+        """状态文案走主题角色（error/success），不使用内联颜色。"""
+        self._status_label.setText(text)
+        self._status_label.setProperty("role", "success" if ok else "error")
+        repolish(self._status_label)
 
     def _on_accept(self):
         if not self._verify_all():

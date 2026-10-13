@@ -114,6 +114,7 @@ class ToolbarMixin:
         self._append_log(
             f"[文件夹] 完成: 文件夹组「{group.group_name}」共 {len(group.tasks)} 个任务"
         )
+        self._show_toast(f"已导入文件夹「{group.group_name}」：{len(group.tasks)} 个任务")
 
     def _find_matching_subtitle(self, media_path: str) -> str:
         """查找与媒体文件同目录、同名的字幕文件。

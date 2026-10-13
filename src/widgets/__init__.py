@@ -10,6 +10,7 @@ from .common import (
 )
 from .step_panel import StepPanel
 from .task_list import TaskListWidget
+from .toast import ToastPopup
 from .tts_panel import TTSConfigPanel, ApiConfigDialog
 from .mixer_panel import MixerConfigPanel
 from .whisper_panel import WhisperConfigPanel
@@ -20,6 +21,7 @@ __all__ = [
     "STATUS_TEXT", "STATUS_COLOR",
     "StepPanel",
     "TaskListWidget",
+    "ToastPopup",
     "TTSConfigPanel", "ApiConfigDialog",
     "MixerConfigPanel",
     "WhisperConfigPanel",

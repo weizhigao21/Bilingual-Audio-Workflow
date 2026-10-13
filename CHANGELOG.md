@@ -2,6 +2,75 @@
 
 基于 PyQt6 的三步式配音工作流工具（字幕提取 → 语音合成 → 音频混音）。
 
+## [v2.2.5] - 2026-10-13
+
+第四轮截图反馈（一项）：去掉任务树展开箭头右侧多出来的线头。
+
+- **修复横向肘线越过展开箭头、从箭头右侧露出一截线头**（`TaskRowDelegate._draw_structure`）。箭头画在 `content_left - indent/2` 处、横向占 `±_CHEVRON_SIZE/2`；而横线**一律**画到 `content_left - 2`（比箭头右缘还远约 5px），末端便从箭头右侧露出来——只画箭头、看不到线的行（顶层）不受影响，所以问题只出现在 depth≥1 且有子节点的行。像素实测（depth=1 行，`cy` 扫描线）：`.......============####====.............`，`=` 是线、`#` 是箭头，箭头右侧 4px 线尾清晰可见。
+- 修法：有展开箭头时横线终点改为 **`cx - _CHEVRON_SIZE/4`**（箭头左缘略内），既**不留缝**也不露头；无箭头的行终点仍是 `content_left - 2`（接到内容起点）。修改后同一行扫描为 `.......============####.................`——线止于箭头、右侧干净。
+- **守卫测试 62 → 63 项**：`TreeConnectorTests` 新增 `test_elbow_line_stops_at_the_chevron_without_a_stub`，同时锁三个方向——① 横线必须接到箭头左缘（不能画短了留缝）、② 箭头右缘到内容起点之间不得有任何横线像素（线头）、③ 无子节点的行仍须画到内容起点（防止"一刀切缩短"）。2 类回归完成破坏验证（画到 `content_left-2` → 报 `[25, 26]` 线头像素；画到箭头左缘 → 报"横线没有接到展开箭头"）。全量测试 213 passed / 17 subtests passed。
+
+## [v2.2.4] - 2026-10-13
+
+第三轮截图反馈（两项）：任务树连接逻辑重做 + 消除界面跳动。
+
+- **任务树连接线重做为标准的"一条竖线 + 横线挂钩"**（`TaskRowDelegate._draw_structure`）。上一版只补了横向肘线，竖线仍然是断的：自身列只画"行顶 → 行中心"的半行，行与行之间留缝看着像虚线；末子更是 `drawLine(x, cy, x, cy)` 画了个零长度线段，等于完全不画——所以截图里顶层节点和子节点之间**没有任何连线**。现在按 Qt 原生 `drawBranch` 的语义重画：自身列末子画 `└`（竖线止于肘点）、非末子画 `├`（竖线贯穿整行接到下一个兄弟）；**已展开的父节点从自身中心向下补一段竖线**，于是子级各行的竖线首尾相接，从父节点中心一路连到末子中心，是一条**连续直线**；祖先列改为"该祖先还有后续兄弟时才续画"（`State_Sibling` 语义，否则末子之后会留下一条挂不到任何节点、直拖到子树底部的悬空长线）。
+- **消除中央区跳动（卡片高矮变化）**：`StepPanel` 的输出路径行此前**无输出时整行隐藏**，有输出时才显示——这一显隐让每个步骤卡高矮相差**一个行高（实测 97px ↔ 119px，三张卡合计 78px）**，切换任务/清空输出时下面是日志卡跟着整体上跳下窜。截图比对的两张图卡片高度实测正是 119px 与 93px。现在该行**恒定占位**：没有输出时显示 `字幕：尚未生成`（前缀按步骤取 字幕/配音/成品），卡片高度任何状态下都不变。
+- 顺带修掉两处长文本反向撑宽布局的隐患：输出路径标签与换行细节标签都设了 `minimumWidth=1` + 水平 `Ignored` 尺寸策略，长路径不再反向撑宽卡片（窄窗口下会被裁切且触发二次布局），输出行的自适应省略仍按实际分配宽度计算。
+- **守卫测试 59 → 62 项**：`TreeConnectorTests` 新增 `test_parent_spine_is_continuous`（从父节点中心到末子中心逐行扫描，一个断点都不许有）、`test_sole_child_does_not_leave_a_dangling_line`（末子之后不得残留祖先列竖线），并把 `test_last_child_uses_corner_style` 改成断言"肘点以下无竖线"；`ShellLayoutTests` 新增 `test_step_card_height_is_stable_with_and_without_output`（有/无输出卡片等高），`test_step_panel_output_elides_with_full_tooltip` 改为断言占位文案而非隐藏。6 类回归全部完成破坏验证（改坏即失败、恢复即通过）。全量测试 212 passed / 17 subtests passed。`ui_preview.py` 增加 `idle` 任务渲染空态（`09_window_idle.png`），便于与 `01_window.png` 肉眼对卡片高度。
+
+## [v2.2.3] - 2026-10-13
+
+第二轮截图反馈（七项），全部为界面结构与可视缺陷修复。
+
+- **修复勾选框显示成实心黑方块（根因：QSS 资源路径带了 `file:///` 前缀）**：`QCheckBox::indicator:checked` 的 `image: url(file:///...)` 在本机 Qt 上**静默加载失败**——加了前缀只画得出 `background`，于是只剩一个纯黑块；实测同一文件加前缀为 0 个白色像素、不加前缀 23 个。`resource_url()` 改为返回**纯文件路径**（含中文目录同样有效），并加注释说明原因。此前一直被误当成"图标丢失/打包 datas 问题"。
+- **移除底部操作栏**：整条底栏（当前任务名 + 总进度条 + 百分比 + 「停止执行」+ 跑马灯状态文字）删除，主窗口从三区变为**侧栏 + 中央两区**。这些信息全部重复（当前任务在标题行、进度在步骤卡与侧栏、停止在工具栏「停止批量」）；顺带清掉了 `_append_log` 往底栏塞状态文字的行为（截图里那行「[任务恢复] 恢复 7 个任务…」就是从这来的）。同步删除 `BOTTOM_BAR_HEIGHT/PADDING` 常量、`#bottomBar`/`clipTitle` QSS、`_update_global_controls` 及其 6 处调用、`global_stop_btn`/`current_entry_btn`/`bottom_progress` 等控件，以及 `batch_mixin` 的 `status_bar_label` 写入。
+- **合并添加入口 + 字幕/配音下沉**：「添加文件夹」与「添加视频/音频」合并为侧栏程序名下方的唯一主按钮 **「＋ 添加素材」**，点开弹出统一选择窗（先选「视频/音频文件」还是「文件夹」，再进对应浏览对话框，新增 `AddMediaDialog`）；「＋ 添加字幕」移入**字幕提取**步骤卡、「＋ 添加配音」移入**语音生成**步骤卡（与「…配置…」并列）。工具栏精简为 打开工作区 / 配置 / 批量执行 / 停止批量，主按钮唯一。批量进度原本只显示在底栏，现改为「每进入一个任务记一行日志」，不再刷屏。
+- **「已完成」改为明确的绿色**：`PALETTE['ready']` 由偏灰的 `#83907c` 换成 `#2e7d32`，新增 `ready_bg`/`ready_border` 供状态药丸使用；侧栏状态点、日志成功色统一引用同一常量（`LOG_COLORS['success']` 直接取 `PALETTE['ready']`，杜绝两处绿色漂移）。
+- **消除日志卡片下方的大片空白**：日志框原本被 `max-height: 220px` 截断、中央区末尾又挂了一个伸缩空白项，于是卡片下面留白。现在日志卡在外层布局拿 `1` 权重、`QTextEdit` 纵向 Expanding 吸收全部剩余高度，中央内容一直铺到窗口底部。
+- **任务树补横向肘线，增强层级关联**：原来只画各层竖线，看不出"谁挂在谁下面"。现在每行画 `├ / └`（末子用 `└`，竖线只到肘点）、祖先层竖线贯穿整行，肘点向右引一段短线指向状态点；导引线颜色由 `#e4e4e7` 加深到 `#d2d2d7`；肘点 y 与 `QRect.center()` 对齐（原来 `top + height//2` 与 Qt 的中心差 1px，导致依赖中心的像素断言不稳）。
+- **守卫测试 45 → 59 项**：新增 `IndicatorPaintTests`（数像素判定"深底 + 白勾"，直接拦住 `file:///` 回归）、`StatusGreenTests`（绿色必须绿得出来 + 药丸/状态点/日志三处同色）、`TreeConnectorTests`（横向肘线存在、`├`/`└` 竖段长度差异、顶层不画连接线）、`LogAreaLayoutTests`（日志框无小高度上限、日志卡拿伸展权重、末尾无伸缩空白），并扩充 `ShellLayoutTests`（底栏移除后中央区必须铺满窗口）、`ToolbarEntryTests`（新工具栏序列、添加入口在品牌之下/任务树之上、选择窗取值不撞 `QDialog.DialogCode`、添加字幕/配音各归对应步骤卡）。9 类回归全部完成破坏验证（改坏即失败、恢复即通过）。全量测试 209 passed / 17 subtests passed。
+
+## [v2.2.2] - 2026-10-13
+
+以《声笺 UI 风格规范》（`UI_STYLE.md`）为准做二次体检，只修本项目真实缺陷，不照搬上游做法。
+
+- **修复 QWidget 子类 QSS 背景/边框静默失效（本轮根因）**：`SettingsGroup` / `SegmentedControl` / `ToastPopup` 都是 `QWidget` 的 **Python 子类**，Qt 不会为它们自动绘制样式表的 background/border，形如 `QWidget#settingsGroup { border: 1px solid ... }` 的规则被静默忽略——设置分组卡的 13px 圆角边框、分段容器底色、提示浮层的深色底全部没画出来（浮层退化成浅灰底 + 白字，几乎不可读），这正是此前"设置界面没有卡片感"的由来。新增 `ui_theme.StyledWidget` 基类统一开启 `WA_StyledBackground`，三个组件改继承它（实例、`QFrame`、`QDialog` 不受影响，无需改）。
+- **提示浮层淡入淡出改用 `QGraphicsOpacityEffect`**：`windowOpacity` 只对顶层窗口生效，作为子控件的浮层用它完全无效果；同时修正 `setGraphicsEffect` 会清除 `WA_TransparentForMouseEvents` 的问题，鼠标穿透属性改在其后重新设置。重写 `src/widgets/toast.py`。
+- **内联样式清零（7 处）**：`setStyleSheet` 会截断 QSS 继承（子控件拿不到主题规则），改主题时要满仓找颜色。全部改为 objectName / 动态属性（`role="muted|section|error|secondary|brand"`、`kind="text|clipTitle"`），并新增 `LOG_COLORS` 集中日志分级色（`success` 复用 `PALETTE['ready']`，顺带修掉成功绿与状态色板不一致）。
+- **侧栏第二行不再被省略号截断**：实测第二行可用宽度（indentation=14、右侧为进度预留 48px）按层级为 **95 / 81 / 67px**。原任务第二行「进行中 · 步骤2」实测 108px、「失败·步骤2」72px 均超限；组/目录第二行「N 项 · M 完成」120–156px **连最上层 95px 都放不下，必然截断**。现在任务第二行只放纯状态词（最宽 36px），组/目录改为紧凑 `完成/总数`（≤60px），步骤明细与完整说法统一进悬停提示。
+- **修复悬停提示步骤标记全部显示为「1」**：`_step_marks` 的前缀写死成字面量 `"1"`，三步都渲染成 `1✓ 1✗ 1○`；改为按 `step` 取值。
+- **新增 `ElidedLabel`**（`src/widgets/common.py`）：按像素宽度省略并随窗口缩放重算，`tooltip`/`accessibleName`/`text()` 一律保留完整文本，带高度变更保护防布局抖动。用于标题行当前条目名与侧栏工作区标签。
+- **步骤卡输出路径改为按宽度自适应省略**（`src/widgets/step_panel.py`）：替换原先按字符数 72 截断（窄窗口不自适应），保留可点击 `<a href>` 与 HTML 转义。
+- 其余细节：侧栏品牌层级提升到 17px（`role="brand"`）；标题行去掉时间戳噪声（移入 tooltip）；步骤卡内的"字幕配置…/TTS 配置…/混音配置…"降为次要按钮（不再与主按钮抢视觉）；底栏当前条目按钮补可点击暗示；首次配置弹窗补"首次配置"标题、校验状态紧贴路径行、按钮区右对齐；工具栏分隔线/日志框改用 objectName（`toolbarDivider` / `logView`）；TTS 面板音色提示去重。
+- **守卫测试扩充（30 → 45 项）**：新增 `StyledBackgroundTests`（三控件的 QSS 边框像素断言、浮层深色底、鼠标穿透属性、`StyledWidget` 基类）、`InlineStyleTests`（源码级禁止 `setStyleSheet`）、`LogColorTests`（日志色集中且与状态色板一致、禁止硬编码色值）、`SidebarSubtitleTests`（各层级第二行像素预算、纯状态词、tooltip 步骤标记、禁止"数字+符号"拼接）、`ElidedLabelTests`（显示省略而取值完整）。5 类代表性回归全部完成破坏验证（改坏即失败、恢复即通过）。全量测试 195 passed / 17 subtests passed。
+- 新增离屏渲染台 `ui_preview.py`（开发辅助）：一键把主窗口、侧栏、设置四页签、三个功能面板、首次配置、混音信息对话框截成 PNG 供人工核对。
+
+## [v2.2.1] - 2026-10-13
+
+界面细节修订（依据运行截图反馈：文件树没有结构且空白过多、页眉/工具栏太丑、步骤卡信息不清楚、右侧检查器多余）。
+
+- **侧栏任务树结构重做**（`src/widgets/task_list.py`）：修正委托双重缩进——Qt 的 `option.rect.left()` 已含 `indentation×(depth+1)` 层级缩进，原代码又手工加了 8/14px，导致缩进不一致、层级错乱；新增按 depth 绘制的竖向缩进导引线与展开/收起雪佛龙箭头（原生 `drawBranches` 置空，改由行委托统一绘制，避免与自绘箭头重叠）；选中/悬停背景改为铺满整行（含缩进导引区），消除分支区的原生高亮色残留。侧栏提示文案缩短，减少空白。
+- **页眉与工具栏重做**（`src/workflow_gui/window.py`）：原 23px 大标题与工具栏挤在同一行 → 拆为紧凑标题行（14px 当前条目名称 + 右对齐 12px 次要说明，悬停看全量路径）+ 独立单行工具栏；「+ 添加字幕」「+ 添加配音」从检查器移回工具栏，恢复旧版一排按钮形态；侧栏提示文案缩短。
+- **步骤卡输出路径可点击**（`src/widgets/step_panel.py`）：输出标签由 `PlainText` 改为 `RichText`——原来 `<a href='file:///...'>` 被当纯文本裸显（输出行直接露出原始 HTML）；同时对路径做 HTML 转义（`&`/`<`/`>`），防止特殊字符破坏链接标记。
+- **移除右侧检查器面板**：删除属性卡与参数卡及其全部刷新链路（`inspector_labels`、`_refresh_inspector`、`_refresh_param_summaries`、摘要 helper），主窗口由四区改回三区（208px 侧栏 + 中央 + 72px 底栏）；设置入口恢复旧版形态：工具栏"配置"打开统一设置弹窗，三张步骤卡内的"字幕配置…/TTS 配置…/混音配置…"分别定位到对应页签。
+- 顺带修复 `TaskMixin._update_global_controls` 的 `metrics` 未定义 NameError（此前被 `window.py` 中的重复定义掩盖，从未暴露），并删除 `window.py` 里与 mixin 重复的版本；条目级按钮（添加字幕/配音）改为随当前选中与步骤运行状态联动刷新。
+- 守卫测试扩充（`tests/test_ui_theme.py`，16 → 30 项）：新增任务树结构守卫（Qt 缩进语义与 `_depth`、源码级禁止手工加缩进、`drawBranches` 置空、导引线/箭头像素断言、整行选中背景、分支列点击切换且不改选中、内容区点击只选中）、工具栏按钮序列与主按钮分区唯一、条目级按钮联动、步骤卡配置入口、输出 RichText 与转义；检查器区域/QSS 断言随面板移除。10 类代表性回归全部完成破坏验证（改坏即失败、恢复即通过）。全量测试 181 passed / 17 subtests passed。
+
+## [v2.2.0] - 2026-10-13
+
+界面按《声笺 UI 风格规范》（`UI_STYLE.md`）整体重设计，工作区为白色、侧栏浅灰 #fafafa、细分隔线 #eeeeee、小圆角（控件 6px / 设置卡 13px / 弹窗 14px）、深色主按钮 #18181a，强调色 #e0651c 只用于焦点、进度与状态。
+
+- 新增主题模块 `src/ui_theme.py`：色板/字体/尺寸常量集中管理，完整 QSS 一键应用（`apply_theme`：Fusion + 显式中文字体 + 样式表），`repolish` 处理动态属性重刷，`resource_url` 供 QSS 引用 PNG 资源。
+- 主窗口重构为四区骨架：208px 侧栏（任务队列 + 工作区信息）+ 中央（三张步骤卡 + 日志卡）+ 352px 检查器（当前任务属性 + 参数摘要）+ 72px 底栏（当前条目、总进度、全局停止）。新增 `ToastPopup` 浮动提示（轻量结果反馈不打断操作）。
+- 新增 `src/widgets/settings_group.py`：`SettingsGroup` 白色分组卡片（标题 + 说明 + 行间 1px 细线）、`SegmentedControl` 分段按钮、`PathRow` 路径行；三个配置面板（字幕提取/语音生成/音频混音）与首次启动 `SetupDialog`、导出作品信息、混音成品信息对话框全部改用该容器。
+- 新增统一设置弹窗 `SettingsDialog`：下划线页签（常规/字幕提取/语音生成/音频混音）替代原来的多个独立对话框；工具栏"配置"与参数卡"设置"按需定位到对应页签。
+- 步骤卡与任务列表视觉重做：步骤徽标 + 状态药丸 + 3px 进度条 + 等宽输出路径（单行省略 + 悬停完整内容 + 可点击打开）；任务行 50px 两行紧凑委托（状态点 + 名称 + 副标题 + 右对齐进度），`text(0)` 旧格式不变，树逻辑测试零改动。
+- 交互稳定性：数值框/下拉/滑条上的滚轮滚动页面而非改值（`WheelScrollGuard`），设置弹窗与侧栏均已安装；主按钮全局唯一（每张步骤卡一个"开始"，工具栏导入区/执行区各一个）。
+- 修复 `SettingsDialog` 以 `initial_tab` 打开时堆叠页不跟随页签的问题；修复 `QFont.StyleHint.SystemDefault` 在本机 PyQt6 不存在导致 `apply_theme` 启动即崩的问题（改用 `System`）。
+- 新增守卫测试 `tests/test_ui_theme.py`（16 项：色板/字体/布局常量、QSS 关键选择器与主按钮配色、`apply_theme` 离屏可执行、主窗口四区与规范宽度、步骤卡主按钮唯一、输出路径省略 + tooltip、分段按钮互斥、设置弹窗页签与定位、滚轮守卫转发、勾选图标资源存在）；4 类代表性回归均已做破坏验证（改坏即失败、恢复即通过）。全量测试 166 passed / 17 subtests passed。
+- 打包：`.spec` 的 datas 补充 `resources/ui`（勾选图标 PNG；`Qt6Svg` 已被排除，不能用 SVG）。
+
 ## [v2.1.22] - 2026-10-12
 
 - 修复 **Edge TTS 全部片段 403 失败**：微软自 2026-10 起拒绝 `speech.platform.bing.com` 上的 WSS 合成请求（`403 Invalid response status`），Edge 浏览器改走 `api.msedgeservices.com`（官方修复 rany2/edge-tts#491 尚未发布新版本）。`tts_utils` 导入时把合成端点改指向新主机（沿用同一 TrustedClientToken，改以 `Ocp-Apim-Subscription-Key` 查询参数传递）；检测到库已使用新主机时不覆盖，官方修复发布后本补丁自动失效。实测对比：旧端点直连与走代理均稳定 403，新端点正常合成返回音频；403 失败信息附带时钟/网络排查提示。修改 `src/steps/tts_utils.py`。

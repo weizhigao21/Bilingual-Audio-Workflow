@@ -183,13 +183,9 @@ class StepMixin:
         panel.progress.setValue(max(0, min(100, value)))
 
     def _on_step_status(self, step: int, text: str):
-        """语音和混音状态显示在进度条下方，保留进度条百分比。"""
+        """步骤实时状态显示在进度条下方，进度条只保留百分比。"""
         panel = self.step_panels[step]
-        if step in (2, 3):
-            panel.progress.setFormat("%p%")
-            panel.set_detail(text)
-        else:
-            panel.progress.setFormat(f"{text}  |  %p%")
+        panel.set_detail(text)
 
     def _on_step_total(self, step: int, total: int):
         """步骤内总任务数（如 TTS 的总片段数），仅记录，进度条 range 恒为 0-100。"""

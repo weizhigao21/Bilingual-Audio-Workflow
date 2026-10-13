@@ -1,77 +1,80 @@
 # -*- coding: utf-8 -*-
-"""TTS 配置面板与 API 服务器列表编辑对话框。"""
+"""TTS 配置面板与 API 服务器列表编辑对话框（声笺风格）。
+
+模式使用紧凑分段按钮切换（Edge TTS / API 服务器），选中项白底细边框；
+两组参数分别放在白色设置卡片中。修改配置后自动保存并发出 config_changed。
+"""
 from PyQt6.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox,
-    QSpinBox, QCheckBox, QPushButton, QStackedWidget, QDialog, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView
+    QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QPushButton,
+    QSpinBox, QStackedWidget, QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import pyqtSignal
 
 from ..steps.tts_cache import AudioCache
 from .common import EDGE_TTS_VOICES, RATE_PRESETS, VOLUME_PRESETS
 from .local_voice_picker import VoicePicker
+from .settings_group import SettingsGroup, SegmentedControl
 
 
-class TTSConfigPanel(QGroupBox):
-    """TTS 配置面板：模式选择、edge参数、api选择。
+class TTSConfigPanel(QWidget):
+    """TTS 配置面板：模式选择、Edge 参数、API 参数。"""
 
-    修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
-    """
     config_changed = pyqtSignal()
     log_message = pyqtSignal(str)
 
     def __init__(self, config, parent=None):
-        super().__init__("TTS 配置")
+        super().__init__(parent)
         self.config = config
         self._build_ui()
         self._load_values()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(12)
 
-        # 第1行：模式选择
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("模式:"))
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("微软 Edge TTS（免费）", "edge")
-        self.mode_combo.addItem("API 服务器", "api")
-        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        row1.addWidget(self.mode_combo)
-        row1.addStretch()
-        layout.addLayout(row1)
+        # 模式：紧凑分段按钮（2 个互斥选项）
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("合成模式")
+        mode_label.setProperty("role", "section")
+        mode_row.addWidget(mode_label)
+        mode_row.addStretch(1)
+        self.mode_segment = SegmentedControl([
+            ("Edge TTS（免费）", "edge"),
+            ("API 服务器", "api"),
+        ])
+        self.mode_segment.current_changed.connect(self._on_mode_changed)
+        mode_row.addWidget(self.mode_segment)
+        layout.addLayout(mode_row)
 
-        # edge 模式配置
-        self.edge_group = QGroupBox("Edge TTS 参数")
-        edge_layout = QGridLayout(self.edge_group)
-
-        edge_layout.addWidget(QLabel("声音:"), 0, 0)
+        # Edge 模式参数
+        self.edge_group = SettingsGroup(
+            "Edge TTS 参数", "免费微软在线合成，无需本地服务。")
         self.voice_combo = QComboBox()
         for vid, name in EDGE_TTS_VOICES.items():
             self.voice_combo.addItem(f"{name} - {vid}", vid)
         self.voice_combo.currentIndexChanged.connect(self._save)
-        edge_layout.addWidget(self.voice_combo, 0, 1)
+        self.edge_group.add_row("声音", "免费 Edge TTS 仅支持上列普通话声音",
+                                self.voice_combo)
         self.voice_hint = QLabel()
         self.voice_hint.setWordWrap(True)
-        self.voice_hint.setStyleSheet("color: #666; font-size: 11px;")
-        edge_layout.addWidget(self.voice_hint, 6, 0, 1, 2)
+        self.voice_hint.setProperty("role", "muted")
+        self.edge_group.add_widget_row(self.voice_hint)
 
-        edge_layout.addWidget(QLabel("语速:"), 1, 0)
         self.rate_combo = QComboBox()
         self.rate_combo.addItems(RATE_PRESETS)
         self.rate_combo.setEditable(True)
         self.rate_combo.currentIndexChanged.connect(self._save)
         self.rate_combo.editTextChanged.connect(self._save)
-        edge_layout.addWidget(self.rate_combo, 1, 1)
+        self.edge_group.add_row("语速", "相对基准语速的百分比", self.rate_combo)
 
-        edge_layout.addWidget(QLabel("音量:"), 2, 0)
         self.volume_combo = QComboBox()
         self.volume_combo.addItems(VOLUME_PRESETS)
         self.volume_combo.setEditable(True)
         self.volume_combo.currentIndexChanged.connect(self._save)
         self.volume_combo.editTextChanged.connect(self._save)
-        edge_layout.addWidget(self.volume_combo, 2, 1)
+        self.edge_group.add_row("音量", "相对基准音量的百分比", self.volume_combo)
 
-        edge_layout.addWidget(QLabel("线程池数量:"), 3, 0)
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(1, 20)
         self.threads_spin.setToolTip(
@@ -80,9 +83,9 @@ class TTSConfigPanel(QGroupBox):
             "实际发出的请求数另由「全局并发上限」闸门控制。"
         )
         self.threads_spin.valueChanged.connect(self._save)
-        edge_layout.addWidget(self.threads_spin, 3, 1)
+        self.edge_group.add_row("线程池数量", "所有音频共享的合成线程池",
+                                self.threads_spin)
 
-        edge_layout.addWidget(QLabel("全局并发上限:"), 4, 0)
         self.max_concurrent_spin = QSpinBox()
         self.max_concurrent_spin.setRange(1, 20)
         self.max_concurrent_spin.setToolTip(
@@ -91,9 +94,9 @@ class TTSConfigPanel(QGroupBox):
             "（Cannot connect to ...bing.com:443），建议 5-8"
         )
         self.max_concurrent_spin.valueChanged.connect(self._save)
-        edge_layout.addWidget(self.max_concurrent_spin, 4, 1)
+        self.edge_group.add_row("全局并发上限", "请求闸门，防止触发限流",
+                                self.max_concurrent_spin)
 
-        edge_layout.addWidget(QLabel("流水线语音并行:"), 5, 0)
         self.pipeline_tts_spin = QSpinBox()
         self.pipeline_tts_spin.setRange(1, 10)
         self.pipeline_tts_spin.setToolTip(
@@ -102,42 +105,44 @@ class TTSConfigPanel(QGroupBox):
             "片段级并发由「全局并发上限」统一控制（共享线程池，不叠加）。"
         )
         self.pipeline_tts_spin.valueChanged.connect(self._save)
-        edge_layout.addWidget(self.pipeline_tts_spin, 5, 1)
+        self.edge_group.add_row("流水线语音并行", "流水线模式下的任务级并行数",
+                                self.pipeline_tts_spin)
 
-        # api 模式配置
-        self.api_group = QGroupBox("API 服务器参数")
-        api_layout = QGridLayout(self.api_group)
+        # API 模式参数
+        self.api_group = SettingsGroup(
+            "API 服务器参数", "连接本地/远程 TTS 服务（如声笺、GPT-SoVITS）。")
 
-        api_layout.addWidget(QLabel("当前API:"), 0, 0)
+        api_row = QHBoxLayout()
+        api_row.setSpacing(6)
         self.api_combo = QComboBox()
         self.api_combo.currentIndexChanged.connect(self._on_api_changed)
-        api_layout.addWidget(self.api_combo, 0, 1)
-
-        edit_api_btn = QPushButton("编辑API列表...")
+        api_row.addWidget(self.api_combo, 1)
+        edit_api_btn = QPushButton("编辑列表…")
         edit_api_btn.clicked.connect(self._on_edit_apis)
-        api_layout.addWidget(edit_api_btn, 0, 2)
-
+        api_row.addWidget(edit_api_btn)
         test_api_btn = QPushButton("测试全部")
         test_api_btn.setToolTip("测试所有 API 服务器是否可用，并刷新其状态")
         test_api_btn.clicked.connect(self._on_test_all_apis)
-        api_layout.addWidget(test_api_btn, 0, 3)
+        api_row.addWidget(test_api_btn)
+        api_row_widget = QWidget()
+        api_row_widget.setLayout(api_row)
+        self.api_group.add_wide_row("当前 API", "", api_row_widget)
 
-        api_layout.addWidget(QLabel("批量大小:"), 1, 0)
         self.bulk_spin = QSpinBox()
         self.bulk_spin.setRange(1, 100)
         self.bulk_spin.valueChanged.connect(self._save)
-        api_layout.addWidget(self.bulk_spin, 1, 1)
+        self.api_group.add_row("批量大小", "批量 API 每次提交的片段数", self.bulk_spin)
 
-        self.multi_api_check = QCheckBox("多API轮询（失败自动切换下一个）")
+        self.multi_api_check = QCheckBox("多 API 轮询（失败自动切换下一个）")
         self.multi_api_check.toggled.connect(self._save)
-        api_layout.addWidget(self.multi_api_check, 2, 0, 1, 3)
+        self.api_group.add_widget_row(self.multi_api_check)
 
-        self.bulk_check = QCheckBox("使用批量API（加速合成）")
+        self.bulk_check = QCheckBox("使用批量 API（加速合成）")
         self.bulk_check.toggled.connect(self._save)
-        api_layout.addWidget(self.bulk_check, 3, 0, 1, 3)
+        self.api_group.add_widget_row(self.bulk_check)
 
         self.local_voice_picker = VoicePicker(self)
-        api_layout.addWidget(self.local_voice_picker, 4, 0, 1, 4)
+        self.api_group.add_widget_row(self.local_voice_picker)
 
         # 用 QStackedWidget 切换 edge/api 面板，避免窗口被撑大后不缩小
         self.config_stack = QStackedWidget()
@@ -148,19 +153,21 @@ class TTSConfigPanel(QGroupBox):
         # 缓存信息 + 清除按钮
         cache_row = QHBoxLayout()
         self.cache_info_label = QLabel("缓存：加载中...")
-        self.cache_info_label.setStyleSheet("color: #666; font-size: 12px;")
-        cache_row.addWidget(self.cache_info_label)
-        cache_row.addStretch()
+        self.cache_info_label.setProperty("role", "secondary")
+        cache_row.addWidget(self.cache_info_label, 1)
         clear_cache_btn = QPushButton("清除缓存")
         clear_cache_btn.setToolTip("删除所有 TTS 音频缓存，下次合成将重新生成")
         clear_cache_btn.clicked.connect(self._on_clear_cache)
         cache_row.addWidget(clear_cache_btn)
-        layout.addLayout(cache_row)
+        cache_widget = QWidget()
+        cache_widget.setLayout(cache_row)
+        layout.addWidget(cache_widget)
+        layout.addStretch(1)
 
     def _load_values(self):
         cfg = self.config.tts_cfg
         # 阻断信号，防止加载过程中 _on_mode_changed→_save 覆盖配置
-        widgets = [self.mode_combo, self.voice_combo, self.rate_combo,
+        widgets = [self.voice_combo, self.rate_combo,
                    self.volume_combo, self.threads_spin,
                    self.max_concurrent_spin, self.pipeline_tts_spin,
                    self.api_combo,
@@ -168,11 +175,9 @@ class TTSConfigPanel(QGroupBox):
         for w in widgets:
             w.blockSignals(True)
         try:
-            # 模式
+            # 模式（分段按钮，不触发 _save）
             mode = cfg.get("tts_mode", "edge")
-            idx = self.mode_combo.findData(mode)
-            if idx >= 0:
-                self.mode_combo.setCurrentIndex(idx)
+            self.mode_segment.set_current_data(mode)
             # edge 参数
             voice = cfg.get("edge_voice", "zh-CN-XiaoxiaoNeural")
             idx = self.voice_combo.findData(voice)
@@ -191,7 +196,6 @@ class TTSConfigPanel(QGroupBox):
             self.multi_api_check.setChecked(cfg.get("use_multi_api", False))
             self.bulk_check.setChecked(cfg.get("use_bulk_api", True))
             # 显示对应面板（不触发 _save）
-            mode = self.mode_combo.currentData()
             self.config_stack.setCurrentIndex(0 if mode == "edge" else 1)
         finally:
             for w in widgets:
@@ -200,8 +204,11 @@ class TTSConfigPanel(QGroupBox):
         self._update_voice_hint()
 
     def _update_voice_hint(self):
+        """声音行下方的补充说明（与行内说明不重复：只给列表规模与限制）。"""
         if self.voice_combo.currentData() in EDGE_TTS_VOICES:
-            self.voice_hint.setText("免费 Edge TTS 支持上列 6 个普通话声音，Azure 声音不能直接用于此模式。")
+            self.voice_hint.setText(
+                f"当前列表 {len(EDGE_TTS_VOICES)} 个音色；"
+                f"Azure 声音不能直接用于此模式。")
         else:
             self.voice_hint.setText("保存的声音不在免费 Edge TTS 可用列表中，请重新选择声音后生成。")
 
@@ -218,8 +225,7 @@ class TTSConfigPanel(QGroupBox):
         self.api_combo.blockSignals(False)
         self.local_voice_picker.sync_from_config()
 
-    def _on_mode_changed(self):
-        mode = self.mode_combo.currentData()
+    def _on_mode_changed(self, mode):
         self.config_stack.setCurrentIndex(0 if mode == "edge" else 1)
         self._save()
 
@@ -263,7 +269,7 @@ class TTSConfigPanel(QGroupBox):
 
     def _save(self):
         cfg = self.config.tts_cfg
-        cfg["tts_mode"] = self.mode_combo.currentData()
+        cfg["tts_mode"] = self.mode_segment.current_data()
         cfg["edge_voice"] = self.voice_combo.currentData()
         self._update_voice_hint()
         cfg["edge_rate"] = self.rate_combo.currentText()
@@ -318,7 +324,7 @@ class TTSConfigPanel(QGroupBox):
 
 
 class ApiConfigDialog(QDialog):
-    """API 服务器列表编辑对话框。"""
+    """API 服务器列表编辑对话框（白底卡片 + 细线表格）。"""
 
     log_message = pyqtSignal(str)
 
@@ -326,12 +332,28 @@ class ApiConfigDialog(QDialog):
         super().__init__(parent)
         self.config = config
         self.setWindowTitle("编辑 API 服务器列表")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(620)
         self._apis = [dict(a) for a in config.tts_cfg.get("api_configs", [])]
         self._build_ui()
 
     def _build_ui(self):
+        from PyQt6.QtWidgets import (
+            QAbstractItemView, QDialogButtonBox, QHeaderView,
+            QTableWidget, QTableWidgetItem, QVBoxLayout
+        )
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("API 服务器")
+        title.setProperty("role", "section")
+        layout.addWidget(title)
+        hint = QLabel(
+            "同一 URL 上换了模型时，在这里填不同的标签（如 GPT-SoVITS-女声A），\n"
+            "用于区分语音缓存与语音输出目录；留空则与旧版本行为一致。")
+        hint.setWordWrap(True)
+        hint.setProperty("role", "muted")
+        layout.addWidget(hint)
 
         # 表格
         self.table = QTableWidget(0, 5)
@@ -339,14 +361,13 @@ class ApiConfigDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.SelectedClicked)
-        self.table.setToolTip(
-            "同一 URL 上换了模型时，在这里填不同的标签（如 GPT-SoVITS-女声A），\n"
-            "用于区分语音缓存与语音输出目录；留空则与旧版本行为一致。")
+        self.table.verticalHeader().setVisible(False)
         layout.addWidget(self.table)
         self._refresh_table()
 
         # 按钮
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         add_btn = QPushButton("+ 添加")
         add_btn.clicked.connect(self._on_add)
         btn_row.addWidget(add_btn)
@@ -357,8 +378,9 @@ class ApiConfigDialog(QDialog):
         test_all_btn.setToolTip("逐个测试所有 API 服务器并刷新状态列")
         test_all_btn.clicked.connect(self._on_test_all)
         btn_row.addWidget(test_all_btn)
-        btn_row.addStretch()
+        btn_row.addStretch(1)
         ok_btn = QPushButton("确定")
+        ok_btn.setProperty("kind", "primary")
         ok_btn.clicked.connect(self._on_accept)
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
@@ -367,6 +389,7 @@ class ApiConfigDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _refresh_table(self):
+        from PyQt6.QtWidgets import QTableWidgetItem
         self.table.setRowCount(len(self._apis))
         for i, api in enumerate(self._apis):
             self.table.setItem(i, 0, QTableWidgetItem(api.get("name", "")))
@@ -376,6 +399,7 @@ class ApiConfigDialog(QDialog):
             self.table.setItem(i, 4, QTableWidgetItem(api.get("status", "unknown")))
 
     def _on_add(self):
+        from PyQt6.QtWidgets import QTableWidgetItem
         self._apis.append({"name": "新服务器", "url": "http://", "model": "",
                            "model_tag": "", "status": "unknown"})
         self._refresh_table()
@@ -389,7 +413,7 @@ class ApiConfigDialog(QDialog):
 
     def _on_test_all(self):
         """逐个测试所有 API 服务器并更新状态列。"""
-        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from PyQt6.QtWidgets import QApplication, QMessageBox, QTableWidgetItem
         from ..steps.tts_utils import test_api_server
         for i, api in enumerate(self._apis):
             url = api.get("url", "")
@@ -405,6 +429,7 @@ class ApiConfigDialog(QDialog):
         QMessageBox.information(self, "测试完成", "所有 API 服务器测试完成，状态已更新。")
 
     def _on_accept(self):
+        from PyQt6.QtWidgets import QMessageBox
         # 从表格收集数据
         for i in range(self.table.rowCount()):
             self._apis[i]["name"] = self.table.item(i, 0).text()

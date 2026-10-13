@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
-"""音频混音配置面板。"""
+"""音频混音配置面板（声笺风格设置分组卡片）。
+
+修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
+"""
 from PyQt6.QtWidgets import (
-    QGroupBox, QFormLayout, QHBoxLayout, QWidget, QLabel, QLineEdit, QPushButton,
-    QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox
+    QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import pyqtSignal
 
+from .settings_group import PathRow, SettingsGroup
 
-class MixerConfigPanel(QGroupBox):
-    """音频混音配置面板：导出格式、音量、声道等。
 
-    修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
-    """
+class MixerConfigPanel(QWidget):
+    """音频混音配置面板：导出格式、音量、声道等。"""
+
     config_changed = pyqtSignal()
 
     # 质量档位 → (比特率, 采样率, 声道数)
@@ -23,28 +26,24 @@ class MixerConfigPanel(QGroupBox):
     }
 
     def __init__(self, config, parent=None):
-        super().__init__("混音配置")
+        super().__init__(parent)
         self.config = config
         self._build_ui()
+        # 兼容旧引用：导出目录输入框
+        self.output_edit = self.output_row.edit
         self._load_values()
 
     def _build_ui(self):
-        layout = QFormLayout(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(12)
 
-        # 导出目录
-        out_box = QHBoxLayout()
-        self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("留空=输出到源文件同目录下的\"双语\"文件夹")
-        self.output_edit.textChanged.connect(self._save)
-        out_box.addWidget(self.output_edit)
-        browse_btn = QPushButton("选择...")
-        browse_btn.clicked.connect(self._on_browse_output)
-        out_box.addWidget(browse_btn)
-        out_widget = QWidget()
-        out_widget.setLayout(out_box)
-        layout.addRow("导出目录:", out_widget)
+        # 导出
+        export = SettingsGroup("导出", "输出位置、封装格式与音频质量。")
+        self.output_row = PathRow("留空=输出到源文件同目录下的\"双语\"文件夹")
+        self.output_row.text_changed.connect(self._save)
+        export.add_wide_row("导出目录", "", self.output_row)
 
-        # 导出格式
         self.format_combo = QComboBox()
         self.format_combo.addItem("MP4（视频，H.264）", "mp4")
         self.format_combo.addItem("MP3（音频）", "mp3")
@@ -52,9 +51,8 @@ class MixerConfigPanel(QGroupBox):
         self.format_combo.addItem("WAV（无损音频）", "wav")
         self.format_combo.addItem("AAC（音频）", "aac")
         self.format_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("导出格式:", self.format_combo)
+        export.add_row("导出格式", "", self.format_combo)
 
-        # 导出音频质量（档位预设）
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("标准（192k / 44.1kHz）", "standard")
         self.preset_combo.addItem("低（128k / 44.1kHz）", "low")
@@ -62,63 +60,65 @@ class MixerConfigPanel(QGroupBox):
         self.preset_combo.addItem("极致（320k / 48kHz）", "extreme")
         self.preset_combo.addItem("自定义", "custom")
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        layout.addRow("音频质量:", self.preset_combo)
+        export.add_row("音频质量", "选择预设后自动联动比特率/采样率/声道",
+                       self.preset_combo)
 
-        # 高级参数（选"自定义"或手动改动时启用）
         self.bitrate_combo = QComboBox()
         for b in ("128k", "192k", "256k", "320k"):
             self.bitrate_combo.addItem(b, b)
         self.bitrate_combo.currentIndexChanged.connect(self._on_quality_param_changed)
-        layout.addRow("比特率:", self.bitrate_combo)
+        export.add_row("比特率", "仅自定义质量可用", self.bitrate_combo)
 
         self.sr_combo = QComboBox()
         self.sr_combo.addItem("44100 Hz", 44100)
         self.sr_combo.addItem("48000 Hz", 48000)
         self.sr_combo.currentIndexChanged.connect(self._on_quality_param_changed)
-        layout.addRow("采样率:", self.sr_combo)
+        export.add_row("采样率", "", self.sr_combo)
 
         self.channels_combo = QComboBox()
         self.channels_combo.addItem("立体声（2 声道）", 2)
         self.channels_combo.addItem("单声道（1 声道）", 1)
         self.channels_combo.currentIndexChanged.connect(self._on_quality_param_changed)
-        layout.addRow("声道:", self.channels_combo)
+        export.add_row("声道", "", self.channels_combo)
 
         self.depth_combo = QComboBox()
         for d in (16, 24, 32):
             self.depth_combo.addItem(f"{d} bit", d)
         self.depth_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("WAV 位深:", self.depth_combo)
+        export.add_row("WAV 位深", "仅 WAV 输出生效", self.depth_combo)
+        layout.addWidget(export)
 
-        # 音量调整（dB）
+        # 音量与对齐
+        volume = SettingsGroup("音量与对齐", "配音相对原音频的电平与空间定位。")
         self.volume_spin = QDoubleSpinBox()
         self.volume_spin.setRange(-30.0, 30.0)
         self.volume_spin.setSingleStep(0.5)
         self.volume_spin.setSuffix(" dB")
         self.volume_spin.valueChanged.connect(self._save)
-        layout.addRow("配音音量:", self.volume_spin)
+        volume.add_row("配音音量", "在自动音量基础上的附加增益", self.volume_spin)
 
-        # 自动音量模式
         self.auto_vol_combo = QComboBox()
         self.auto_vol_combo.addItem("匹配原音频整体 RMS", "fixed")
         self.auto_vol_combo.addItem("动态跟随原音频 RMS", "auto")
         self.auto_vol_combo.addItem("仅使用配音音量增益", "off")
         self.auto_vol_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("音量模式:", self.auto_vol_combo)
+        volume.add_row("音量模式", "", self.auto_vol_combo)
 
         self.peak_combo = QComboBox()
         self.peak_combo.addItem("保真峰值保护（整段统一衰减）", "peak")
         self.peak_combo.addItem("软限幅（保留旧版听感）", "soft")
-        self.peak_combo.setToolTip("保真模式将超出 -1 dBFS 的样本峰值统一降低，保留动态和声像；尖峰可能让整段更轻。不是过采样真峰值限幅。")
+        self.peak_combo.setToolTip(
+            "保真模式将超出 -1 dBFS 的样本峰值统一降低，保留动态和声像；"
+            "尖峰可能让整段更轻。不是过采样真峰值限幅。")
         self.peak_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("峰值保护:", self.peak_combo)
+        volume.add_row("峰值保护", "", self.peak_combo)
 
-        # 声道检测
         self.channel_detect_check = QCheckBox("启用声道检测（根据原音频位置自动定位）")
         self.channel_detect_check.toggled.connect(self._save)
-        layout.addRow("", self.channel_detect_check)
+        volume.add_widget_row(self.channel_detect_check)
 
-        # 声道映射角度
         chan_box = QHBoxLayout()
+        chan_box.setSpacing(6)
         chan_box.addWidget(QLabel("左:"))
         self.angle_left = QSpinBox()
         self.angle_left.setRange(0, 180)
@@ -134,78 +134,84 @@ class MixerConfigPanel(QGroupBox):
         self.angle_right.setRange(0, 180)
         self.angle_right.valueChanged.connect(self._save)
         chan_box.addWidget(self.angle_right)
+        chan_box.addStretch(1)
         chan_widget = QWidget()
         chan_widget.setLayout(chan_box)
-        layout.addRow("声道角度:", chan_widget)
+        volume.add_wide_row("声道角度", "0–180 度，仅声道检测启用时生效", chan_widget)
 
-        # 起始对齐
         self.align_check = QCheckBox("起始对齐（对齐配音起拍点到原音频）")
         self.align_check.toggled.connect(self._save)
-        layout.addRow("", self.align_check)
+        volume.add_widget_row(self.align_check)
 
-        # 内容对齐
         self.content_align_check = QCheckBox("内容对齐（用原音频人声起始点纠正时间戳）")
         self.content_align_check.toggled.connect(self._save)
-        layout.addRow("", self.content_align_check)
+        volume.add_widget_row(self.content_align_check)
+        layout.addWidget(volume)
 
-        self.resample_check = QCheckBox("高质量重采样（采样率不同时更慢）")
-        self.resample_check.setToolTip("配音和输出采样率转换使用 FFmpeg 64 点滤波；关闭后配音使用快速转换。视频画面直接复制，音频编码不依赖 GPU。")
-        self.resample_check.toggled.connect(self._save)
-        layout.addRow("", self.resample_check)
-
-        # 添加后缀
+        # 输出选项
+        output = SettingsGroup("输出选项", "命名规则、跳过策略与作品信息。")
         self.suffix_check = QCheckBox("输出文件添加 _mixed 后缀")
         self.suffix_check.toggled.connect(self._save)
-        layout.addRow("", self.suffix_check)
+        output.add_widget_row(self.suffix_check)
 
-        # 文件夹前缀
         self.folder_prefix_check = QCheckBox("文件夹导入混音后重命名源文件夹（添加\"双语-\"前缀）")
         self.folder_prefix_check.toggled.connect(self._save)
-        layout.addRow("", self.folder_prefix_check)
+        output.add_widget_row(self.folder_prefix_check)
 
-        # 输出目录带源文件夹名前缀
         self.output_prefix_check = QCheckBox("输出目录带源文件夹名前缀（双语 → 双语-文件夹名，仅文件夹导入）")
         self.output_prefix_check.toggled.connect(self._save)
-        layout.addRow("", self.output_prefix_check)
+        output.add_widget_row(self.output_prefix_check)
 
-        # 跳过已存在
         self.skip_check = QCheckBox("跳过已存在的输出文件")
         self.skip_check.toggled.connect(self._save)
-        layout.addRow("", self.skip_check)
+        output.add_widget_row(self.skip_check)
 
         metadata_row = QHBoxLayout()
+        metadata_row.setSpacing(8)
         self.metadata_check = QCheckBox("导出时写入作品信息")
         self.metadata_check.setToolTip("控制标题、艺术家、专辑、备注及版本标签；工作区任务记录仍会保存混音版本。")
         self.metadata_check.toggled.connect(self._save)
-        metadata_row.addWidget(self.metadata_check)
-        metadata_btn = QPushButton("编辑信息...")
+        metadata_btn = QPushButton("编辑信息…")
         metadata_btn.setToolTip("选择导出时写入的字段并设置内容")
         metadata_btn.clicked.connect(self._edit_metadata_settings)
+        metadata_row.addWidget(self.metadata_check)
         metadata_row.addWidget(metadata_btn)
-        metadata_row.addStretch()
+        metadata_row.addStretch(1)
         metadata_widget = QWidget()
         metadata_widget.setLayout(metadata_row)
-        layout.addRow("作品信息:", metadata_widget)
+        output.add_widget_row(metadata_widget)
+        layout.addWidget(output)
 
-        # 线程数
+        # 高级
+        advanced = SettingsGroup("高级", "重采样质量、线程与内存策略。")
+        self.resample_check = QCheckBox("高质量重采样（采样率不同时更慢）")
+        self.resample_check.setToolTip(
+            "配音和输出采样率转换使用 FFmpeg 64 点滤波；关闭后配音使用快速转换。"
+            "视频画面直接复制，音频编码不依赖 GPU。")
+        self.resample_check.toggled.connect(self._save)
+        advanced.add_widget_row(self.resample_check)
+
         self.thread_spin = QSpinBox()
         self.thread_spin.setRange(1, 32)
         self.thread_spin.setSuffix(" 线程")
         self.thread_spin.valueChanged.connect(self._save)
-        layout.addRow("线程数:", self.thread_spin)
+        advanced.add_row("线程数", "FFmpeg 编码线程", self.thread_spin)
 
         self.streaming_spin = QSpinBox()
         self.streaming_spin.setRange(0, 240)
         self.streaming_spin.setSuffix(" 分钟")
         self.streaming_spin.setSpecialValueText("始终使用磁盘缓冲")
-        self.streaming_spin.setToolTip("达到此时长后使用磁盘缓冲混音，降低内存占用，但需要更多临时磁盘空间。设为 0 可始终启用。")
+        self.streaming_spin.setToolTip(
+            "达到此时长后使用磁盘缓冲混音，降低内存占用，"
+            "但需要更多临时磁盘空间。设为 0 可始终启用。")
         self.streaming_spin.valueChanged.connect(self._save)
-        layout.addRow("长音频磁盘缓冲:", self.streaming_spin)
+        advanced.add_row("长音频磁盘缓冲", "超过该时长走磁盘缓冲混音", self.streaming_spin)
 
-        # 批量并行
         self.batch_parallel_check = QCheckBox("批量执行时多任务并行混音")
         self.batch_parallel_check.toggled.connect(self._save)
-        layout.addRow("", self.batch_parallel_check)
+        advanced.add_widget_row(self.batch_parallel_check)
+        layout.addWidget(advanced)
+        layout.addStretch(1)
 
     def _on_preset_changed(self):
         """档位预设切换：联动参数控件并锁定/解锁。"""
@@ -245,7 +251,7 @@ class MixerConfigPanel(QGroupBox):
 
     def _load_values(self):
         cfg = self.config.mixer_cfg
-        widgets = [self.output_edit, self.format_combo, self.preset_combo,
+        widgets = [self.output_row.edit, self.format_combo, self.preset_combo,
                    self.bitrate_combo, self.sr_combo, self.channels_combo,
                    self.depth_combo, self.volume_spin,
                    self.auto_vol_combo, self.peak_combo, self.channel_detect_check,
@@ -259,7 +265,7 @@ class MixerConfigPanel(QGroupBox):
             w.blockSignals(True)
         try:
             # 导出目录
-            self.output_edit.setText(cfg.get("output_folder", ""))
+            self.output_row.setText(cfg.get("output_folder", ""))
             # 导出格式
             fmt = cfg.get("output_format", "mp4")
             idx = self.format_combo.findData(fmt)
@@ -322,7 +328,7 @@ class MixerConfigPanel(QGroupBox):
 
     def _save(self):
         cfg = self.config.mixer_cfg
-        cfg["output_folder"] = self.output_edit.text().strip()
+        cfg["output_folder"] = self.output_row.text().strip()
         cfg["output_format"] = self.format_combo.currentData()
         cfg["export_preset"] = self.preset_combo.currentData()
         cfg["audio_bitrate"] = self.bitrate_combo.currentData()
@@ -362,4 +368,4 @@ class MixerConfigPanel(QGroupBox):
         from PyQt6.QtWidgets import QFileDialog
         folder = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if folder:
-            self.output_edit.setText(folder)
+            self.output_row.setText(folder)

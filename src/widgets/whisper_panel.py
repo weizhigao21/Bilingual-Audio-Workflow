@@ -1,36 +1,41 @@
 # -*- coding: utf-8 -*-
-"""字幕提取配置面板。"""
+"""字幕提取配置面板（声笺风格设置分组卡片）。
+
+修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
+"""
 from PyQt6.QtWidgets import (
-    QGroupBox, QFormLayout, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox
+    QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import pyqtSignal
 
+from .settings_group import SettingsGroup
 
-class WhisperConfigPanel(QGroupBox):
-    """字幕提取配置面板：设备、VAD、合并段落等。
 
-    修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
-    """
+class WhisperConfigPanel(QWidget):
+    """字幕提取配置面板：设备、VAD、合并段落等。"""
+
     config_changed = pyqtSignal()
 
     def __init__(self, config, parent=None):
-        super().__init__("字幕提取配置")
+        super().__init__(parent)
         self.config = config
         self._build_ui()
         self._load_values()
 
     def _build_ui(self):
-        layout = QFormLayout(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(12)
 
-        # 设备
+        # 识别参数
+        basic = SettingsGroup("识别参数", "设备与精度影响速度与显存占用。")
         self.device_combo = QComboBox()
         self.device_combo.addItem("自动", "auto")
         self.device_combo.addItem("CPU", "cpu")
         self.device_combo.addItem("CUDA（GPU）", "cuda")
         self.device_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("设备:", self.device_combo)
+        basic.add_row("设备", "自动优先使用 GPU", self.device_combo)
 
-        # 计算精度
         self.compute_combo = QComboBox()
         self.compute_combo.addItem("自动", "auto")
         self.compute_combo.addItem("int8（最快/省显存）", "int8")
@@ -38,9 +43,8 @@ class WhisperConfigPanel(QGroupBox):
         self.compute_combo.addItem("float16（平衡）", "float16")
         self.compute_combo.addItem("float32（最精确）", "float32")
         self.compute_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("计算精度:", self.compute_combo)
+        basic.add_row("计算精度", "", self.compute_combo)
 
-        # 字幕格式
         self.subfmt_combo = QComboBox()
         self.subfmt_combo.addItem("LRC", "lrc")
         self.subfmt_combo.addItem("VTT", "vtt")
@@ -48,69 +52,74 @@ class WhisperConfigPanel(QGroupBox):
         self.subfmt_combo.addItem("SRT", "srt")
         self.subfmt_combo.addItem("LRC + SRT", "lrc,srt")
         self.subfmt_combo.currentIndexChanged.connect(self._save)
-        layout.addRow("字幕格式:", self.subfmt_combo)
+        basic.add_row("字幕格式", "语音生成读取 LRC；SRT/VTT 供其他用途",
+                      self.subfmt_combo)
+        layout.addWidget(basic)
 
-        # VAD 阈值
+        # VAD 与段落合并
+        vad = SettingsGroup("VAD 与段落合并", "静音检测阈值与相邻段落合并规则。")
         self.vad_threshold_spin = QDoubleSpinBox()
         self.vad_threshold_spin.setRange(0.0, 1.0)
         self.vad_threshold_spin.setSingleStep(0.05)
+        self.vad_threshold_spin.setDecimals(2)
         self.vad_threshold_spin.valueChanged.connect(self._save)
-        layout.addRow("VAD 阈值:", self.vad_threshold_spin)
+        vad.add_row("VAD 阈值", "越高越严格，环境嘈杂时可适当调高",
+                    self.vad_threshold_spin)
 
-        # 最小静音时长
         self.vad_silence_spin = QSpinBox()
         self.vad_silence_spin.setRange(0, 5000)
         self.vad_silence_spin.setSingleStep(50)
         self.vad_silence_spin.setSuffix(" ms")
         self.vad_silence_spin.valueChanged.connect(self._save)
-        layout.addRow("最小静音时长:", self.vad_silence_spin)
+        vad.add_row("最小静音时长", "超过该时长的静音才切分段落",
+                    self.vad_silence_spin)
 
-        # 最小语音时长
         self.vad_speech_spin = QSpinBox()
         self.vad_speech_spin.setRange(0, 5000)
         self.vad_speech_spin.setSingleStep(50)
         self.vad_speech_spin.setSuffix(" ms")
         self.vad_speech_spin.valueChanged.connect(self._save)
-        layout.addRow("最小语音时长:", self.vad_speech_spin)
+        vad.add_row("最小语音时长", "短于该时长的语音片段被忽略",
+                    self.vad_speech_spin)
 
-        # 语音填充
         self.vad_pad_spin = QSpinBox()
         self.vad_pad_spin.setRange(0, 2000)
         self.vad_pad_spin.setSingleStep(50)
         self.vad_pad_spin.setSuffix(" ms")
         self.vad_pad_spin.valueChanged.connect(self._save)
-        layout.addRow("语音填充:", self.vad_pad_spin)
+        vad.add_row("语音填充", "片段前后各保留的缓冲，避免吞字",
+                    self.vad_pad_spin)
 
-        # 合并段落
         self.merge_check = QCheckBox("启用段落合并")
+        self.merge_check.setToolTip("合并相邻短段落，减少碎片字幕")
         self.merge_check.toggled.connect(self._save)
-        layout.addRow("", self.merge_check)
+        vad.add_widget_row(self.merge_check)
 
-        # 合并最大间隔
         self.merge_gap_spin = QSpinBox()
         self.merge_gap_spin.setRange(0, 5000)
         self.merge_gap_spin.setSingleStep(50)
         self.merge_gap_spin.setSuffix(" ms")
         self.merge_gap_spin.valueChanged.connect(self._save)
-        layout.addRow("合并最大间隔:", self.merge_gap_spin)
+        vad.add_row("合并最大间隔", "间隔小于该值才合并", self.merge_gap_spin)
 
-        # 合并最大时长
         self.merge_dur_spin = QSpinBox()
         self.merge_dur_spin.setRange(1000, 60000)
         self.merge_dur_spin.setSingleStep(1000)
         self.merge_dur_spin.setSuffix(" ms")
         self.merge_dur_spin.valueChanged.connect(self._save)
-        layout.addRow("合并最大时长:", self.merge_dur_spin)
+        vad.add_row("合并最大时长", "合并后单段不超过该时长", self.merge_dur_spin)
+        layout.addWidget(vad)
 
-        # 批处理
+        # 高级
+        advanced = SettingsGroup("高级")
         self.batch_check = QCheckBox("启用批处理（加速但占更多显存）")
         self.batch_check.toggled.connect(self._save)
-        layout.addRow("", self.batch_check)
-
-        # 覆盖已有
+        advanced.add_widget_row(self.batch_check)
         self.overwrite_check = QCheckBox("覆盖已有字幕文件")
         self.overwrite_check.toggled.connect(self._save)
-        layout.addRow("", self.overwrite_check)
+        advanced.add_widget_row(self.overwrite_check)
+        layout.addWidget(advanced)
+        layout.addStretch(1)
 
     def _load_values(self):
         cfg = self.config.whisper_cfg

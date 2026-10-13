@@ -32,6 +32,7 @@ from PyQt6.QtGui import QIcon
 
 from src.crash_log import install as install_crash_log
 from src.steps.tts_logger import purge_old_logs
+from src.ui_theme import apply_theme
 from src.workflow_gui import WorkflowMainWindow
 from src.config import WorkflowConfig
 from src.version import APP_VERSION
@@ -51,6 +52,8 @@ def main():
     if purged:
         print(f"[日志] 已清理 {purged} 个过期日志文件")
     app = QApplication(sys.argv)
+    # 声笺风格主题必须在任何窗口/对话框创建前应用（QSS 对已创建控件不回溯）
+    apply_theme(app)
     if os.path.exists(_ICON_PATH):
         app.setWindowIcon(QIcon(_ICON_PATH))
     app.setApplicationVersion(VERSION)

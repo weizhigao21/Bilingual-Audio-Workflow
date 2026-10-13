@@ -14,6 +14,8 @@ a = Analysis(
         # 只打包必要的配置文件，排除运行时生成的缓存/日志
         (os.path.join(BASE_DIR, 'resources', 'configs', 'ui.ico'), os.path.join('resources', 'configs')),
         (os.path.join(BASE_DIR, 'resources', 'configs', 'workflow_config.json'), os.path.join('resources', 'configs')),
+        # 声笺风格 QSS 引用的勾选图标（.spec 排除 Qt6Svg，只能用 PNG）
+        (os.path.join(BASE_DIR, 'resources', 'ui'), os.path.join('resources', 'ui')),
     ],
     hiddenimports=[
         'edge_tts',

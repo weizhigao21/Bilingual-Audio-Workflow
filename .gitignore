@@ -12,4 +12,7 @@ resources/tts_audio_cache/
 resources/batch_tts_output/
 resources/logs/
 resources/configs/tts_audio_cache.db
+_preview/
 .workbuddy/
+# 本地字幕/翻译产物，属于工作素材，不入库
+subtitles/
