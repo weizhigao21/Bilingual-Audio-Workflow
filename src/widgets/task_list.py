@@ -587,13 +587,7 @@ class TaskListWidget(QTreeWidget):
 
     @staticmethod
     def _overall_status(task: TaskInfo) -> str:
-        if task.step3_status == STEP_DONE:
-            return "done"
-        if task.step1_status == STEP_FAILED or task.step2_status == STEP_FAILED or task.step3_status == STEP_FAILED:
-            return "failed"
-        if task.step1_status == STEP_RUNNING or task.step2_status == STEP_RUNNING or task.step3_status == STEP_RUNNING:
-            return "running"
-        return "pending"
+        return task.overall_status()
 
     # ---------- 选中与右键 ----------
     def _on_item_changed(self, current, previous):

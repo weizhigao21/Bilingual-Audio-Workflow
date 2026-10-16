@@ -94,6 +94,8 @@ class TTSBridgeSignalTests(unittest.TestCase):
                 self.log_signal = SignalSink()
                 self.step_progress_signal = SignalSink()
                 self.step_status_signal = SignalSink()
+                self.task_updated = SignalSink()
+                self._stop_flag = False
 
             def _create_worker(self, task, step):
                 return FastWorker()

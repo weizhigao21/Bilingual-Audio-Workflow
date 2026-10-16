@@ -52,12 +52,16 @@ class ToolbarMixin:
 
     def _apply_subtitle_to_task(self, task_id: str, subtitle_path: str):
         """将字幕文件应用到任务（跳过步骤1）。"""
-        self.task_queue.set_task_custom_subtitle(task_id, subtitle_path)
+        if self._batch_executor or not self.task_queue.set_task_custom_subtitle(task_id, subtitle_path):
+            self._append_log("[字幕] 任务正在运行或不存在，未更换字幕")
+            return
         self._append_log(f"[字幕] 已设置自定义字幕: {os.path.basename(subtitle_path)} (跳过步骤1)")
 
     def _apply_mix_folder_to_task(self, task_id: str, mix_folder: str):
         """将配音目录应用到任务（跳过步骤2）。"""
-        self.task_queue.set_task_custom_mix_folder(task_id, mix_folder)
+        if self._batch_executor or not self.task_queue.set_task_custom_mix_folder(task_id, mix_folder):
+            self._append_log("[配音] 任务正在运行或不存在，未更换配音目录")
+            return
         self._append_log(f"[配音] 已设置自定义配音目录: {os.path.basename(mix_folder)} (跳过步骤2)")
 
     def _scan_folder_for_tasks(self, folder: str):

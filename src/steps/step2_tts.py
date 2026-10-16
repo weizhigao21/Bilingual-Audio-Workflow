@@ -28,6 +28,7 @@ class TTSBridgeWorker(QThread):
         self.task = task
         self.config = config
         self._tts_worker = None
+        self._stop_flag = False
         self._total = 0          # 总片段数
         self._done_count = 0     # 已完成片段数（含跳过）
         self._total_weight = 0   # 全部片段总字数
@@ -42,6 +43,7 @@ class TTSBridgeWorker(QThread):
         self.finished_signal.emit(ok, msg)
 
     def stop(self):
+        self._stop_flag = True
         self.requestInterruption()
         if self._tts_worker:
             try:
@@ -65,6 +67,9 @@ class TTSBridgeWorker(QThread):
             self._emit_finished(False, str(e))
 
     def _run_impl(self):
+        if self._stop_flag or self.isInterruptionRequested():
+            self._emit_finished(False, "语音生成已取消")
+            return
         # 检查字幕文件
         lrc_path = self.task.step1_output
         if not lrc_path or not os.path.exists(lrc_path):
@@ -72,7 +77,7 @@ class TTSBridgeWorker(QThread):
             return
 
         cfg = prepare_workflow_config(self.config)
-        if self.isInterruptionRequested():
+        if self._stop_flag or self.isInterruptionRequested():
             self._emit_finished(False, "语音生成已取消")
             return
 
@@ -151,6 +156,9 @@ class TTSBridgeWorker(QThread):
 
         # 所有内部回调都用 DirectConnection，完成信号即使很快发出也不会
         # 早于事件循环启动而丢失；直接等待线程真正退出即可。
+        if self._stop_flag:
+            self._emit_finished(False, "语音生成已取消")
+            return
         self._tts_worker.start()
         self._tts_worker.wait()
 

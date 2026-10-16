@@ -2,7 +2,7 @@
 """批量执行器 Mixin：单任务单步执行（事件循环等待 / 同步等待两种方式）。"""
 from PyQt6.QtCore import QEventLoop, Qt
 
-from ...task_manager import TaskInfo, STEP_RUNNING, STEP_DONE, STEP_FAILED
+from ...task_manager import TaskInfo, STEP_RUNNING
 
 
 class SingleStepMixin:
@@ -22,6 +22,9 @@ class SingleStepMixin:
             return False, "无法创建 worker"
 
         task.set_step_status(step, STEP_RUNNING)
+        task.set_step_error(step, "")
+        task.set_step_output(step, "")
+        self.task_updated.emit(task.task_id)
         loop = QEventLoop()
         result = [None]
 
@@ -59,21 +62,18 @@ class SingleStepMixin:
                 lambda t, s=step: self.step_total_signal.emit(s, t)
             )
         worker.finished_signal.connect(on_finished)
-        worker.start()
-
         self._current_worker = worker
+        if self._stop_flag:
+            worker.stop()
+        worker.start()
         loop.exec()
         # finished_signal 在 run() 的 finally 之前发出，必须等线程真正退出再释放
         worker.wait()
         self._current_worker = None
 
         ok, msg = result[0] if result[0] else (False, "未知错误")
-        if ok:
-            task.set_step_status(step, STEP_DONE)
-            task.set_step_output(step, msg)
-        else:
-            task.set_step_status(step, STEP_FAILED)
-            task.set_step_error(step, msg)
+        task.finish_step(step, ok, msg, cancelled=self._stop_flag)
+        self.task_updated.emit(task.task_id)
         return ok, msg
 
     def _run_single_step_sync(self, task: TaskInfo, step: int,
@@ -92,6 +92,9 @@ class SingleStepMixin:
             return False, "无法创建 worker"
 
         task.set_step_status(step, STEP_RUNNING)
+        task.set_step_error(step, "")
+        task.set_step_output(step, "")
+        self.task_updated.emit(task.task_id)
         # 与 _run_single_step 一致：worker 日志统一加任务名前缀
         worker.log_signal.connect(
             lambda m, n=task.source_name: self.log_signal.emit(f"[{n}] {m}"),
@@ -120,15 +123,15 @@ class SingleStepMixin:
             )
 
         self._track_worker(worker, True)
-        worker.start()
-        worker.wait()
-        self._track_worker(worker, False)
+        try:
+            if self._stop_flag:
+                worker.stop()
+            worker.start()
+            worker.wait()
+        finally:
+            self._track_worker(worker, False)
 
         ok, msg = getattr(worker, "result", None) or (False, "未知错误")
-        if ok:
-            task.set_step_status(step, STEP_DONE)
-            task.set_step_output(step, msg)
-        else:
-            task.set_step_status(step, STEP_FAILED)
-            task.set_step_error(step, msg)
+        task.finish_step(step, ok, msg, cancelled=self._stop_flag)
+        self.task_updated.emit(task.task_id)
         return ok, msg

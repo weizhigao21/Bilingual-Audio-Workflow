@@ -419,6 +419,8 @@ class MixerBatchWorker(QThread):
                     return _log
 
                 def _run_task(task, slot):
+                    if self._stop_flag:
+                        return False, "用户中止"
                     with lock:
                         active_names[task.task_id] = task.source_name[:4]
                         self.status_signal.emit(
@@ -448,11 +450,11 @@ class MixerBatchWorker(QThread):
                         # 取消尚未开始的任务
                         for f in future_to_task:
                             f.cancel()
-                        break
 
                     task = future_to_task[future]
                     try:
-                        ok, msg = future.result()
+                        ok, msg = ((False, "用户中止") if future.cancelled()
+                                   else future.result())
                     except Exception as e:
                         ok, msg = False, str(e)
 
@@ -468,8 +470,9 @@ class MixerBatchWorker(QThread):
                         )
 
                     # 任务结束即占满份额，平均进度随之推进
-                    with lock:
-                        slots[task.task_id]["pct"] = 100
+                    if ok or not self._stop_flag:
+                        with lock:
+                            slots[task.task_id]["pct"] = 100
                     self.task_result_signal.emit(task.task_id, ok, msg)
 
                     self.progress_signal.emit(min(_avg_pct(), 99))
@@ -479,7 +482,8 @@ class MixerBatchWorker(QThread):
         if self._stop_flag:
             self.log_signal.emit("[音频混音批量] 已中止")
 
-        self.progress_signal.emit(100)
+        if not self._stop_flag:
+            self.progress_signal.emit(100)
         self.log_signal.emit(
             f"[音频混音批量] 完成: 成功 {success_count}, 失败 {fail_count}"
         )

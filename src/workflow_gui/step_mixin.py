@@ -46,6 +46,9 @@ class StepMixin:
 
     # ========== 步骤执行 ==========
     def _on_start_step(self, step: int):
+        if self._batch_executor or any(self._workers.values()):
+            QMessageBox.warning(self, "提示", "已有任务正在运行，请先停止。")
+            return
         # 组模式：对组内所有任务逐个执行该步骤
         if self._current_group:
             if self._selected_folder:
@@ -93,24 +96,29 @@ class StepMixin:
         worker.log_signal.connect(self._append_log)
         if hasattr(worker, "status_signal"):
             worker.status_signal.connect(
-                lambda text, s=step: self._on_step_status(s, text)
+                lambda text, s=step, t=task: self._on_step_status(s, text, t.task_id)
             )
         worker.progress_signal.connect(
-            lambda v, s=step: self._on_step_progress(s, v)
+            lambda v, s=step, t=task: self._on_step_progress(s, v, t.task_id)
         )
         worker.finished_signal.connect(
             lambda ok, msg, s=step, t=task: self._on_step_finished(s, t, ok, msg)
         )
 
         self._workers[step] = worker
+        task.reset_from(step)
         task.set_step_status(step, STEP_RUNNING)
         task.set_step_error(step, "")
+        if not hasattr(self, "_step_runtime"):
+            self._step_runtime = {}
+        self._step_runtime[(task.task_id, step)] = (0, "")
         self.step_panels[step].set_running(True)
         self.step_panels[step].set_status(STEP_RUNNING)
         # 启动前重置该步骤进度条（TTS 的 total 信号会随后调整上限）
         self.step_panels[step].progress.setRange(0, 100)
         self.step_panels[step].progress.setValue(0)
         self.step_panels[step].set_detail("")
+        self.task_queue.update_task(task)
         self._refresh_step_panels(task)
         worker.start()
 
@@ -122,8 +130,8 @@ class StepMixin:
 
     def _start_group_step(self, group: TaskGroup, step: int):
         """执行文件夹组的指定步骤；字幕按文件夹集中提取。"""
-        if self._batch_executor:
-            QMessageBox.warning(self, "提示", "已有批量执行正在进行中，请先停止。")
+        if self._batch_executor or any(self._workers.values()):
+            QMessageBox.warning(self, "提示", "已有任务正在运行，请先停止。")
             return
         if not group.tasks:
             QMessageBox.information(self, "提示", "该文件夹组没有任务。")
@@ -175,15 +183,26 @@ class StepMixin:
         # 片段总数仅记录备用，不再作为进度条 range
         self._tts_total = total
 
-    def _on_step_progress(self, step: int, value: int):
+    def _on_step_progress(self, step: int, value: int, task_id=None):
         # 所有步骤（含 TTS）的 progress 均为 0-100 百分比，
         # 统一 range 显示，避免片段数与百分比混用导致 clamp 假 100%/回退
+        if task_id is not None:
+            runtime = self._step_runtime
+            runtime[(task_id, step)] = (max(0, min(100, value)),
+                                        runtime.get((task_id, step), (0, ""))[1])
+            if not self.task_queue.current or self.task_queue.current.task_id != task_id:
+                return
         panel = self.step_panels[step]
         panel.progress.setRange(0, 100)
         panel.progress.setValue(max(0, min(100, value)))
 
-    def _on_step_status(self, step: int, text: str):
+    def _on_step_status(self, step: int, text: str, task_id=None):
         """步骤实时状态显示在进度条下方，进度条只保留百分比。"""
+        if task_id is not None:
+            runtime = self._step_runtime
+            runtime[(task_id, step)] = (runtime.get((task_id, step), (0, ""))[0], text)
+            if not self.task_queue.current or self.task_queue.current.task_id != task_id:
+                return
         panel = self.step_panels[step]
         panel.set_detail(text)
 
@@ -193,28 +212,30 @@ class StepMixin:
             self._tts_total = total
 
     def _on_step_finished(self, step: int, task: TaskInfo, success: bool, msg: str):
-        self.step_panels[step].set_detail("")
+        worker = self._workers.get(step)
+        cancelled = bool(worker is not None and getattr(worker, "_stop_flag", False))
+        task.finish_step(step, success, msg, cancelled=cancelled)
+        getattr(self, "_step_runtime", {}).pop((task.task_id, step), None)
         if success:
-            task.set_step_status(step, STEP_DONE)
-            task.set_step_output(step, msg)
             self._append_log(f"[步骤{step}] 完成: {msg}")
             # 文件夹导入且混音完成后，重命名源文件夹添加"双语-"前缀
             if step == 3 and task.from_folder and self.config.mixer_cfg.get("folder_prefix", True):
                 self._rename_source_folder(task)
         else:
-            task.set_step_status(step, STEP_FAILED)
-            task.set_step_error(step, msg)
-            self._append_log(f"[步骤{step}] 失败: {msg}")
+            self._append_log(f"[步骤{step}] {'已停止' if cancelled else '失败'}: {msg}")
 
         # 释放 worker 前必须等线程真正退出：finished_signal 在 run() 的
         # finally（防休眠关闭/缓存落盘）之前发出，立即丢弃引用会触发
         # "QThread: Destroyed while thread is still running" 原生 abort 闪退
-        worker = self._workers.get(step)
         if worker is not None:
             worker.wait()
             self._workers[step] = None
         self.task_queue.update_task(task)
-        self._refresh_step_panels(task)
+        # update_task 只刷新当前选中的任务/组，不能让后台完成的任务覆盖面板。
+        if self.task_queue.current:
+            self._refresh_step_panels(self.task_queue.current)
+        elif self._current_group:
+            self._show_group_summary(self._current_group)
         if step == 3:
             from ..steps.audio_utils import clear_mix_cache
             clear_mix_cache()

@@ -136,6 +136,7 @@ class BatchMixin:
         self._batch_executor.step_status_signal.connect(self._on_step_status)
         self._batch_executor.step_total_signal.connect(self._on_step_total)
         self._batch_executor.task_started.connect(self._on_batch_task_started)
+        self._batch_executor.task_updated.connect(self._on_batch_task_updated)
         self._batch_executor.task_finished.connect(self._on_batch_task_finished)
         self._batch_executor.finished_signal.connect(self._on_batch_finished)
 
@@ -159,8 +160,14 @@ class BatchMixin:
     def _on_batch_task_started(self, task_id: str):
         task = self.task_queue.get_task(task_id)
         if task:
-            self.task_queue.set_current(task_id)
-            self._refresh_step_panels(task)
+            self.task_queue.update_task(task)
+            if self.task_queue.current is None and self._current_group is None:
+                self.task_queue.set_current(task_id)
+
+    def _on_batch_task_updated(self, task_id: str):
+        task = self.task_queue.get_task(task_id)
+        if task:
+            self.task_queue.update_task(task)
 
     def _on_batch_task_finished(self, task_id: str, success: bool):
         task = self.task_queue.get_task(task_id)
@@ -170,7 +177,11 @@ class BatchMixin:
                 self._refresh_step_panels(task)
 
     def _on_batch_finished(self, success: int, fail: int, skipped: int):
-        self.step_panels[2].set_detail("")
+        executor = self._batch_executor
+        if executor is not None:
+            executor.wait()
+        for panel in self.step_panels.values():
+            panel.set_detail("")
         self._batch_executor = None
         self.batch_btn.setEnabled(True)
         self.batch_stop_btn.setEnabled(False)
@@ -179,7 +190,8 @@ class BatchMixin:
             self._refresh_step_panels(self.task_queue.current)
         elif self._current_group:
             self._show_group_summary(self._current_group)
-        self._show_toast(f"批量执行完成：成功 {success} · 失败 {fail} · 跳过 {skipped}")
+        label = "批量执行已停止" if executor is not None and executor._stop_flag else "批量执行完成"
+        self._show_toast(f"{label}：成功 {success} · 失败 {fail} · 跳过 {skipped}")
         # 批量完成后，统一重命名文件夹导入的源文件夹
         if self.config.mixer_cfg.get("folder_prefix", True):
             self._rename_batch_folders()

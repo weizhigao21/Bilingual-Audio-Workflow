@@ -71,7 +71,8 @@ class ByStepMixin:
 
                 ok, msg = self._run_single_step(task, step, i, total)
                 # 推进该步骤的任务间累计进度
-                self.step_progress_signal.emit(step, int((i + 1) * 100 / total))
+                if ok or not self._stop_flag:
+                    self.step_progress_signal.emit(step, int((i + 1) * 100 / total))
                 if ok:
                     self.log_signal.emit(f"[批量] [{task.source_name}] 步骤{step} 完成: {msg}")
                 else:
@@ -135,6 +136,8 @@ class ByStepMixin:
         # 标记所有任务为 running
         for task in pending_tasks:
             task.set_step_status(1, STEP_RUNNING)
+            task.set_step_error(1, "")
+            task.set_step_output(1, "")
             self.task_started.emit(task.task_id)
 
         worker = WhisperBatchWorker(pending_tasks, self.config)
@@ -145,14 +148,12 @@ class ByStepMixin:
             results[task_id] = (ok, msg)
             task_obj = next((t for t in pending_tasks if t.task_id == task_id), None)
             if task_obj:
+                task_obj.finish_step(1, ok, msg, cancelled=self._stop_flag)
                 if ok:
-                    task_obj.set_step_status(1, STEP_DONE)
-                    task_obj.set_step_output(1, msg)
                     self.log_signal.emit(f"[批量] [{task_obj.source_name}] 字幕完成: {msg}")
                 else:
-                    task_obj.set_step_status(1, STEP_FAILED)
-                    task_obj.set_step_error(1, msg)
-                    failed_tasks.add(task_id)
+                    if not self._stop_flag:
+                        failed_tasks.add(task_id)
                     self.log_signal.emit(f"[批量] [{task_obj.source_name}] 字幕失败: {msg}")
                 self.task_finished.emit(task_id, ok)
                 if ok and on_task_ready is not None:
@@ -172,15 +173,26 @@ class ByStepMixin:
         worker.task_result_signal.connect(on_task_result)
         worker.finished_signal.connect(on_finished)
 
-        worker.start()
         self._current_worker = worker
+        if self._stop_flag:
+            worker.stop()
+        worker.start()
         loop.exec()
         # finished_signal 在 run() 的 finally 之前发出，必须等线程真正退出再释放
         worker.wait()
         self._current_worker = None
 
-        self.progress_signal.emit(total, total, 1)
-        self.step_progress_signal.emit(1, 100)
+        for task in pending_tasks:
+            if task.task_id not in results:
+                message = "用户中止，可重新执行" if self._stop_flag else "字幕工作器未返回结果"
+                task.finish_step(1, False, message, cancelled=self._stop_flag)
+                if not self._stop_flag:
+                    failed_tasks.add(task.task_id)
+                self.task_finished.emit(task.task_id, False)
+
+        if not self._stop_flag:
+            self.progress_signal.emit(total, total, 1)
+            self.step_progress_signal.emit(1, 100)
         self.log_signal.emit(
             f"[批量] 步骤1 批量完成: 成功 {len(results) - sum(1 for ok, _ in results.values() if not ok)}, "
             f"失败 {sum(1 for ok, _ in results.values() if not ok)}"
@@ -220,20 +232,20 @@ class ByStepMixin:
         # 标记所有任务为 running
         for task in pending_tasks:
             task.set_step_status(3, STEP_RUNNING)
+            task.set_step_error(3, "")
+            task.set_step_output(3, "")
             self.task_started.emit(task.task_id)
 
         worker = MixerBatchWorker(pending_tasks, self.config)
         loop = QEventLoop()
+        reported = set()
 
         def on_task_result(task_id, ok, msg):
+            reported.add(task_id)
             task_obj = next((t for t in pending_tasks if t.task_id == task_id), None)
             if task_obj:
-                if ok:
-                    task_obj.set_step_status(3, STEP_DONE)
-                    task_obj.set_step_output(3, msg)
-                else:
-                    task_obj.set_step_status(3, STEP_FAILED)
-                    task_obj.set_step_error(3, msg)
+                task_obj.finish_step(3, ok, msg, cancelled=self._stop_flag)
+                if not ok and not self._stop_flag:
                     failed_tasks.add(task_id)
                 self.task_finished.emit(task_id, ok)
 
@@ -255,13 +267,24 @@ class ByStepMixin:
         worker.task_result_signal.connect(on_task_result)
         worker.finished_signal.connect(on_finished)
 
-        worker.start()
         self._current_worker = worker
+        if self._stop_flag:
+            worker.stop()
+        worker.start()
         loop.exec()
         # finished_signal 在 run() 的 finally 之前发出，必须等线程真正退出再释放
         worker.wait()
         self._current_worker = None
 
-        self.progress_signal.emit(total, total, 3)
-        self.step_progress_signal.emit(3, 100)
+        for task in pending_tasks:
+            if task.task_id not in reported:
+                message = "用户中止，可重新执行" if self._stop_flag else "混音工作器未返回结果"
+                task.finish_step(3, False, message, cancelled=self._stop_flag)
+                if not self._stop_flag:
+                    failed_tasks.add(task.task_id)
+                self.task_finished.emit(task.task_id, False)
+
+        if not self._stop_flag:
+            self.progress_signal.emit(total, total, 3)
+            self.step_progress_signal.emit(3, 100)
         self.log_signal.emit(f"[批量] 步骤3 并行批量完成")

@@ -34,6 +34,7 @@ class BatchExecutor(
     step_total_signal = pyqtSignal(int, int)
     log_signal = pyqtSignal(str)
     task_started = pyqtSignal(str)        # task_id
+    task_updated = pyqtSignal(str)        # 每次步骤状态转换，包括任务中间步骤
     task_finished = pyqtSignal(str, bool) # (task_id, success)
     # (success_count, fail_count, skipped_count)
     finished_signal = pyqtSignal(int, int, int)
@@ -140,6 +141,10 @@ class BatchExecutor(
 
     def run(self):
         total = len(self.tasks)
+        success = fail = skipped = 0
+        # 不接管调用方已经在执行的步骤，也不在收尾时重置它们。
+        previously_running = {(task.task_id, step) for task in self.tasks for step in self.steps
+                              if task.step_status(step) == STEP_RUNNING}
 
         try:
             if self.order == "by_step":
@@ -148,11 +153,38 @@ class BatchExecutor(
                 success, fail, skipped = self._run_pipeline(total)
             else:
                 success, fail, skipped = self._run_by_task(total)
+        except Exception as exc:
+            self.log_signal.emit(f"[批量] 执行异常: {exc}")
+            for task in self.tasks:
+                for step in self.steps:
+                    if (task.step_status(step) == STEP_RUNNING
+                            and (task.task_id, step) not in previously_running):
+                        task.finish_step(step, False, str(exc))
+                        self.task_updated.emit(task.task_id)
+            success = sum(all(task.step_status(s) in (STEP_DONE, STEP_SKIPPED)
+                              for s in self.steps) for task in self.tasks)
+            fail = total - success
         finally:
+            # 取消/工作器提前退出时，所有已接管的 running 都必须收尾。
+            for task in self.tasks:
+                for step in self.steps:
+                    if (task.step_status(step) == STEP_RUNNING
+                            and (task.task_id, step) not in previously_running):
+                        task.finish_step(step, False,
+                                         "用户中止，可重新执行" if self._stop_flag else "工作器未返回结果",
+                                         cancelled=self._stop_flag)
+                        self.task_updated.emit(task.task_id)
             # by_task / by_step 的单步混音走 MixerWorker（不是 MixerBatchWorker），
             # 不会自行清理 _mix_files_cache；这里统一收尾，避免批量混音
             # 多个任务后片段列表缓存持续累积。
             clear_mix_cache()
+
+        if self._stop_flag:
+            success = sum(all(task.step_status(s) in (STEP_DONE, STEP_SKIPPED)
+                              for s in self.steps) for task in self.tasks)
+            fail = sum(any(task.step_status(s) == STEP_FAILED for s in self.steps)
+                       for task in self.tasks)
+            skipped = total - success - fail
 
         self.log_signal.emit(
             f"\n[批量] 全部完成: 成功 {success}, 失败 {fail}, 跳过 {skipped}"

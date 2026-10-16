@@ -57,7 +57,8 @@ class ByTaskMixin:
 
                 ok, msg = self._run_single_step(task, step, i, total)
                 # 推进该步骤的任务间累计进度（即使失败也推进，避免卡住）
-                self.step_progress_signal.emit(step, int((i + 1) * 100 / total))
+                if ok or not self._stop_flag:
+                    self.step_progress_signal.emit(step, int((i + 1) * 100 / total))
                 if ok:
                     self.log_signal.emit(f"[批量] 步骤{step} 完成: {msg}")
                 else:
@@ -65,8 +66,10 @@ class ByTaskMixin:
                     task_ok = False
                     break  # 此任务后续步骤不再执行
 
-            if task_ok:
+            if all(task.step_status(s) in (STEP_DONE, STEP_SKIPPED) for s in self.steps):
                 success += 1
+            elif self._stop_flag:
+                skipped += 1
             else:
                 fail += 1
             self.task_finished.emit(task.task_id, task_ok)

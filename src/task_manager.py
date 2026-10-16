@@ -223,6 +223,33 @@ class TaskInfo:
         elif step == 2: self.step2_error = error
         elif step == 3: self.step3_error = error
 
+    def reset_from(self, step: int):
+        """输入变化或显式重跑时，使本步及其下游结果失效。保留磁盘文件。"""
+        for current in range(step, 4):
+            self.set_step_status(current, STEP_PENDING)
+            self.set_step_output(current, "")
+            self.set_step_error(current, "")
+        self.force_remix = True
+
+    def finish_step(self, step: int, success: bool, message: str, cancelled=False):
+        """统一完成、失败与取消的状态写回；取消后允许直接重试。"""
+        self.set_step_status(step, STEP_DONE if success else (
+            STEP_PENDING if cancelled else STEP_FAILED))
+        self.set_step_output(step, message if success else "")
+        self.set_step_error(step, "" if success else message)
+        if step == 3 and success:
+            self.force_remix = False
+
+    def overall_status(self) -> str:
+        statuses = [self.step_status(step) for step in (1, 2, 3)]
+        if STEP_RUNNING in statuses:
+            return STEP_RUNNING
+        if STEP_FAILED in statuses:
+            return STEP_FAILED
+        if self.step3_status in (STEP_DONE, STEP_SKIPPED):
+            return STEP_DONE
+        return STEP_PENDING
+
     def is_step_ready(self, step: int) -> bool:
         """检查某步骤是否可以执行（前置步骤已完成或跳过）。"""
         def _prev_done(s):
@@ -264,13 +291,15 @@ class TaskInfo:
                 self.step2_status = STEP_PENDING
                 self.step2_output = ""
             if not tts_dir and tts_config is not None:
-                self.force_remix = bool(self._detect_mix_output())
+                self.force_remix = self.force_remix or bool(self._detect_mix_output())
                 if self.step3_status == STEP_SKIPPED:
                     self.step3_status = STEP_PENDING
                     self.step3_output = ""
 
         # --- 步骤3：检测已生成的混音文件 ---
-        mix_output = self._detect_mix_output() if self.step2_status in (STEP_DONE, STEP_SKIPPED) else ""
+        mix_output = (self._detect_mix_output()
+                      if not self.force_remix and self.step2_status in (STEP_DONE, STEP_SKIPPED)
+                      else "")
         if mix_output:
             self.step3_status = STEP_SKIPPED
             self.step3_output = mix_output
@@ -356,6 +385,8 @@ class TaskInfo:
 
     def overall_progress(self) -> float:
         """整体进度 0~1。"""
+        if self.overall_status() == STEP_DONE:
+            return 1.0
         scores = {
             STEP_PENDING: 0.0, STEP_RUNNING: 0.0,
             STEP_FAILED: 0.0, STEP_SKIPPED: 1.0, STEP_DONE: 1.0,
@@ -391,17 +422,17 @@ class TaskGroup:
 
     def done_count(self) -> int:
         """已完成混音的子任务数。"""
-        return sum(1 for t in self.tasks if t.step3_status == STEP_DONE)
+        return sum(1 for t in self.tasks if t.overall_status() == STEP_DONE)
 
     def overall_status(self) -> str:
         if not self.tasks:
             return STEP_PENDING
         if any(t.step_status(s) == STEP_RUNNING for t in self.tasks for s in (1, 2, 3)):
             return STEP_RUNNING
-        if all(t.step3_status == STEP_DONE for t in self.tasks):
-            return STEP_DONE
         if any(t.step_status(s) == STEP_FAILED for t in self.tasks for s in (1, 2, 3)):
             return STEP_FAILED
+        if all(t.overall_status() == STEP_DONE for t in self.tasks):
+            return STEP_DONE
         return STEP_PENDING
 
 
@@ -554,6 +585,9 @@ class TaskQueue(QObject):
             if task._detect_mix_output() and not task.force_remix:
                 task.force_remix = True
                 changed = True
+        if task.force_remix and task.step3_status in (STEP_DONE, STEP_SKIPPED):
+            task.reset_from(3)
+            changed = True
         # 旧命名的配音目录（只哈希字幕内容）迁移到新命名，避免重跑时另起目录
         if self._migrate_legacy_voice_dir(task):
             changed = True
@@ -699,39 +733,26 @@ class TaskQueue(QObject):
         self.group_removed.emit(group_id)
 
     def set_task_custom_subtitle(self, task_id: str, subtitle_path: str):
-        """为已有任务设置/更新自定义字幕（跳过步骤1）。"""
+        """为已有任务设置/更新自定义字幕，运行中拒绝修改，返回是否成功。"""
         task = self.get_task(task_id)
-        if not task:
-            return
+        if not task or any(task.step_status(s) == STEP_RUNNING for s in (1, 2, 3)):
+            return False
         task.custom_subtitle = os.path.abspath(subtitle_path) if subtitle_path else ""
-        # 清除字幕时恢复步骤1为待处理
-        if not task.custom_subtitle and task.step1_status == STEP_SKIPPED:
-            task.step1_status = STEP_PENDING
-            task.step1_output = ""
-        # 重置后续步骤状态，重新执行文件检测
-        for s in (2, 3):
-            if task.step_status(s) not in (STEP_DONE, STEP_SKIPPED):
-                task.set_step_status(s, STEP_PENDING)
-        task.set_step_output(1, "")
-        task.set_step_error(1, "")
+        task.reset_from(1)
         task.apply_custom_inputs(self.tts_config)
         self.update_task(task)
+        return True
 
     def set_task_custom_mix_folder(self, task_id: str, mix_folder: str):
-        """为已有任务设置/更新自定义配音目录（跳过步骤2）。"""
+        """为已有任务设置/更新配音目录，运行中拒绝修改，返回是否成功。"""
         task = self.get_task(task_id)
-        if not task:
-            return
+        if not task or any(task.step_status(s) == STEP_RUNNING for s in (1, 2, 3)):
+            return False
         task.custom_mix_folder = os.path.abspath(mix_folder) if mix_folder else ""
-        # 重置步骤2，重新执行文件检测
-        if task.step2_status not in (STEP_DONE,):
-            task.step2_status = STEP_PENDING
-            task.step2_output = ""
-        if task.step3_status not in (STEP_DONE,):
-            task.step3_status = STEP_PENDING
-            task.step3_output = ""
+        task.reset_from(2)
         task.apply_custom_inputs(self.tts_config)
         self.update_task(task)
+        return True
 
     def remove_task(self, task_id: str):
         """移除任务（仅从列表移除，不删目录）。"""

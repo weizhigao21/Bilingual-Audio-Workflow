@@ -144,9 +144,11 @@ class PipelineMixin:
                         if task.task_id in needs_mix:
                             mix_queue.put(task)
                     else:
-                        mark_failed(task.task_id)
+                        if not self._stop_flag:
+                            mark_failed(task.task_id)
                         self.log_signal.emit(f"[流水线] [{task.source_name}] 语音失败: {msg}")
-                    update_progress(2, task.task_id, 100)
+                    if ok or not self._stop_flag:
+                        update_progress(2, task.task_id, 100)
                 finally:
                     tts_queue.task_done()
 
@@ -174,9 +176,11 @@ class PipelineMixin:
                     if ok:
                         self.log_signal.emit(f"[流水线] [{task.source_name}] 混音完成")
                     else:
-                        mark_failed(task.task_id)
+                        if not self._stop_flag:
+                            mark_failed(task.task_id)
                         self.log_signal.emit(f"[流水线] [{task.source_name}] 混音失败: {msg}")
-                    update_progress(3, task.task_id, 100)
+                    if ok or not self._stop_flag:
+                        update_progress(3, task.task_id, 100)
                 finally:
                     mix_queue.task_done()
 

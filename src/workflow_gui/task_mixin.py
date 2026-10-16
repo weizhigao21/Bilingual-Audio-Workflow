@@ -79,8 +79,12 @@ class TaskMixin:
             panel.set_status(status)
             panel.set_output("")
             panel.progress.setRange(0, 100)
-            panel.progress.setValue(int(group.progress() * 100))
-            panel.start_btn.setEnabled(True)
+            if self._batch_executor is None:
+                completed = sum(t.step_status(step) in (STEP_DONE, STEP_SKIPPED)
+                                for t in group.tasks)
+                panel.progress.setValue(int(completed * 100 / max(1, total)))
+            panel.start_btn.setEnabled(self._batch_executor is None
+                                       and not any(self._workers.values()))
             panel.stop_btn.setEnabled(False)
         self._refresh_entry_buttons()
 
@@ -128,9 +132,9 @@ class TaskMixin:
         if self.task_queue.current and self.task_queue.current.task_id == task.task_id:
             self._refresh_step_panels(task)
             self._refresh_entry_buttons()
-        elif (self._current_group and not self._batch_executor
+        elif (self._current_group
               and any(t.task_id == task.task_id for t in self._current_group.tasks)):
-            # 组内任务状态变化时刷新组汇总（批量执行中不刷新，避免干扰进度显示）
+            # 批量执行时也刷新状态，汇总视图保留信号驱动的累计进度。
             self._show_group_summary(self._current_group)
 
     def _refresh_step_panels(self, task: TaskInfo):
@@ -152,7 +156,11 @@ class TaskMixin:
             if self._batch_executor is not None:
                 pass
             elif status == STEP_RUNNING:
-                pass
+                progress, detail = getattr(self, "_step_runtime", {}).get(
+                    (task.task_id, step), (0, ""))
+                panel.progress.setRange(0, 100)
+                panel.progress.setValue(progress)
+                panel.set_detail(detail)
             elif status in (STEP_DONE, STEP_SKIPPED):
                 panel.set_detail("")
                 panel.progress.setRange(0, 100)
@@ -168,8 +176,9 @@ class TaskMixin:
             ready = task.is_step_ready(step)
             # skipped 状态禁用开始按钮（已跳过，无需运行）
             # 但允许通过"重跑"来取消跳过
-            panel.start_btn.setEnabled(not running and ready and not skipped)
-            panel.stop_btn.setEnabled(running)
+            busy = self._batch_executor is not None or any(self._workers.values())
+            panel.start_btn.setEnabled(not busy and not running and ready and not skipped)
+            panel.stop_btn.setEnabled(running and self._batch_executor is None)
         # 条目级按钮（添加字幕/配音）随步骤运行状态联动
         self._refresh_entry_buttons()
 
@@ -186,8 +195,8 @@ class TaskMixin:
             return
         task = self.task_queue.current if self.task_queue else None
         enabled = bool(task is not None
-                       and task.step1_status != STEP_RUNNING
-                       and task.step2_status != STEP_RUNNING)
+                       and self._batch_executor is None
+                       and all(task.step_status(s) != STEP_RUNNING for s in (1, 2, 3)))
         for button in buttons:
             button.setEnabled(enabled)
 
@@ -218,26 +227,14 @@ class TaskMixin:
         task = self.task_queue.get_task(task_id)
         if not task:
             return
-        if self._workers.get(step):
-            QMessageBox.warning(self, "提示", f"步骤 {step} 正在运行中。")
+        if self._batch_executor or any(self._workers.values()):
+            QMessageBox.warning(self, "提示", "已有任务正在运行，请先停止。")
             return
         if step == 1 and not self._check_whisper_available():
             return
         # 切换到该任务
         self.task_queue.set_current(task_id)
-        # 重置该步状态（取消 skipped/done/failed）
-        task.set_step_status(step, STEP_PENDING)
-        task.set_step_error(step, "")
-        task.set_step_output(step, "")
-        # 如果重跑的是前置步骤，后续步骤也需要重置
-        if step == 1:
-            task.set_step_status(2, STEP_PENDING)
-            task.set_step_output(2, "")
-            task.set_step_status(3, STEP_PENDING)
-            task.set_step_output(3, "")
-        elif step == 2:
-            task.set_step_status(3, STEP_PENDING)
-            task.set_step_output(3, "")
+        task.reset_from(step)
         self.task_queue.update_task(task)
         self._refresh_step_panels(task)
         # 启动
@@ -298,22 +295,13 @@ class TaskMixin:
             self._rerun_group_tasks(group, step)
 
     def _rerun_group_tasks(self, group: TaskGroup, step: int):
-        if self._batch_executor:
+        if self._batch_executor or any(self._workers.values()):
             QMessageBox.warning(self, "提示", "已有批量执行正在进行中。")
+            return
+        if step == 1 and not self._check_whisper_available():
             return
         self._current_group = group
         for task in group.tasks:
-            task.set_step_status(step, STEP_PENDING)
-            task.set_step_error(step, "")
-            task.set_step_output(step, "")
-            # 重跑前置步骤时，后续步骤一并重置
-            if step == 1:
-                task.set_step_status(2, STEP_PENDING)
-                task.set_step_output(2, "")
-                task.set_step_status(3, STEP_PENDING)
-                task.set_step_output(3, "")
-            elif step == 2:
-                task.set_step_status(3, STEP_PENDING)
-                task.set_step_output(3, "")
+            task.reset_from(step)
             self.task_queue.update_task(task)
         self._start_group_step(group, step)
