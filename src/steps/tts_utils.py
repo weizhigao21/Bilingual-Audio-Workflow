@@ -218,14 +218,16 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
 
 
 def _download_audio(audio_url, save_path, timeout=60):
-    audio_resp = _get_session().get(audio_url, timeout=timeout)
-    audio_resp.raise_for_status()
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(dir=os.path.dirname(save_path),
-                                         prefix=".tts-", suffix=".wav", delete=False) as tmp:
-            temp_path = tmp.name
-            tmp.write(audio_resp.content)
+        with _get_session().get(audio_url, timeout=timeout, stream=True) as audio_resp:
+            audio_resp.raise_for_status()
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(save_path),
+                                             prefix=".tts-", suffix=".wav", delete=False) as tmp:
+                temp_path = tmp.name
+                for chunk in audio_resp.iter_content(chunk_size=262144):
+                    if chunk:
+                        tmp.write(chunk)
         if os.path.getsize(temp_path) == 0:
             raise ValueError("服务器返回空音频")
         os.replace(temp_path, save_path)

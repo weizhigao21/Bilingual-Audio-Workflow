@@ -105,19 +105,25 @@ class BatchMixin:
 
         order = order_combo.current_data()
 
-        # 启动批量执行
-        from ..steps.batch_executor import BatchExecutor
-        self._tts_total = 0  # 批量/流水线模式下进度为 0-100 百分比，重置片段总数记录
-        # 重置三个步骤进度条，避免残留上次运行的值（批量执行中由累计进度驱动）
-        for p in self.step_panels.values():
-            p.progress.setRange(0, 100)
-            p.progress.setValue(0)
-            p.set_detail("")
-        self._batch_executor = BatchExecutor(
-            list(self.task_queue.tasks), steps, self.config,
-            order=order, parent=self
-        )
-        self._connect_batch_signals()
+        # 启动批量执行（导入/构造失败时必须给出可见提示，避免"点了没反应"）
+        try:
+            from ..steps.batch_executor import BatchExecutor
+            self._tts_total = 0  # 批量/流水线模式下进度为 0-100 百分比，重置片段总数记录
+            # 重置三个步骤进度条，避免残留上次运行的值（批量执行中由累计进度驱动）
+            for p in self.step_panels.values():
+                p.progress.setRange(0, 100)
+                p.progress.setValue(0)
+                p.set_detail("")
+            self._batch_executor = BatchExecutor(
+                list(self.task_queue.tasks), steps, self.config,
+                order=order, parent=self
+            )
+            self._connect_batch_signals()
+        except Exception as exc:
+            self._batch_executor = None
+            self._append_log(f"[批量] 启动失败: {type(exc).__name__}: {exc}")
+            QMessageBox.critical(self, "批量执行失败", f"{type(exc).__name__}: {exc}")
+            return
 
         self.batch_btn.setEnabled(False)
         self.batch_stop_btn.setEnabled(True)

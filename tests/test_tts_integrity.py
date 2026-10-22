@@ -170,7 +170,23 @@ class TTSProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/'voice.wav'
             path.write_bytes(b'previous')
-            response = SimpleNamespace(content=b'', raise_for_status=lambda:None)
+            class _EmptyResponse:
+                """模拟 requests.Response：流式下载走 iter_content。"""
+                content = b''
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def raise_for_status(self):
+                    pass
+
+                def iter_content(self, chunk_size=65536):
+                    return iter(())
+
+            response = _EmptyResponse()
             with patch('src.steps.tts_utils._get_session', return_value=SimpleNamespace(get=lambda *a,**k:response)):
                 with self.assertRaises(ValueError):
                     tts_utils._download_audio('http://local/voice', str(path))

@@ -1,10 +1,10 @@
-# 双语音声工作流 v2.2.7
+# 双语音声工作流 v2.2.8
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
 基于 PyQt6 的三步式配音工作流工具：**字幕提取 → 语音合成 → 音频混音**，一键批量处理，输出双语配音视频/音频。
 
-**v2.2.7（2026-10-16）**：修复任务状态更新。更换字幕或配音后正确重置下游结果；重跑混音会重新生成成品；取消批量执行后保留已完成结果，其余任务可重试；后台进度不会覆盖当前选中的任务；已有成品正确计入完成数。新增 20 项回归测试，全量 **270 passed / 24 subtests passed**。使用方式见 [任务状态与重跑](#任务状态与重跑)，完整记录见 [CHANGELOG](CHANGELOG.md)。已有 EXE 需重新运行 `打包.bat` 才能使用本次更新。
+**v2.2.8（2026-10-22）**：修复打包版“点批量执行没反应”。打包目录里残缺的 `backports.zstd`（只有 `_zstd` 扩展、缺包体）让 `urllib3 2.8` 在导入时读取 `zstd.ZstdError` 抛 `AttributeError`，而这一步正好发生在 `_on_batch_execute` 导入执行器时，异常只进了 crash 日志，界面没有任何提示。现在：`src/__init__.py` 会剔除残缺的 `backports.zstd`，打包 `.spec` 直接排除它，批量启动失败也会写入运行日志并弹窗。同一版本工作流侧接入声笺的增量进度 `?pending=1` 与 3 路并行流式下载（未升级声笺时自动回退）。全量 **274 passed / 24 subtests passed**。已部署的 EXE 把 `_internal/backports/zstd` 改名即可生效，重新 `打包.bat` 后不再生成。
 
 ## 功能概览
 
@@ -373,6 +373,8 @@ TTS 合成结果按 **文本、声音/模型、生成设置及 API 来源** 区�
 ## 变更记录
 
 完整版本历史（v1.0.0 起）见 **[CHANGELOG.md](CHANGELOG.md)**。
+
+**v2.2.8（2026-10-22）**：修复打包版“批量执行点了没反应”。打包目录里残缺的 `backports.zstd` 导致 `import requests` 在 urllib3 2.8 导入阶段抛 `AttributeError`，而该导入正好位于 `_on_batch_execute`，异常只被 crash 日志记录，界面无任何反馈。`src/__init__.py` 增加残缺模块剔除补丁，`.spec` 排除 `backports.zstd`，批量启动失败改为写日志并弹窗。同版本工作流侧接入声笺增量进度 `?pending=1`（需服务端返回 `workflow_progress_pending`）与 3 路并行流式下载。全量 **274 passed / 24 subtests passed**。
 
 **v2.2.7（2026-10-16）**：统一任务状态重置、完成及取消的写回逻辑。修复替换输入后仍复用旧成品、重跑混音被已有文件拦截、取消并行混音后停留在运行中、后台完成覆盖当前面板、启动状态未同步以及已有成品未计入完成数等问题；增加运行保护和 20 项回归测试。全量 **270 passed / 24 subtests passed**。
 

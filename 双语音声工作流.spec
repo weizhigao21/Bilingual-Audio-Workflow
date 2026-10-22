@@ -54,6 +54,9 @@ a = Analysis(
         'PyQt6.QtQml', 'PyQt6.QtQuick', 'PyQt6.QtQuickWidgets',
         'PyQt6.QtMultimedia', 'PyQt6.QtMultimediaWidgets',
         'PyQt6.QtCharts', 'PyQt6.QtDataVisualization',
+        # urllib3 2.8 会探测 backports.zstd；若打包体里只剩 _zstd 扩展而缺包体，
+        # import requests 会因缺少 ZstdError 直接崩溃（批量执行"点了没反应"）。
+        'backports', 'backports.zstd', 'backports.zstd._zstd',
     ],
     noarchive=False,
     optimize=0,

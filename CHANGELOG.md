@@ -2,6 +2,22 @@
 
 基于 PyQt6 的三步式配音工作流工具（字幕提取 → 语音合成 → 音频混音）。
 
+## [v2.2.8] - 2026-10-22
+
+**修复打包版“点批量执行没反应”**。反馈原文：点“开始执行”后对话框关闭，任务不开始、不传给声笺、状态不更新。crash 日志给出唯一线索——`batch_mixin.py` 第 109 行 `from ..steps.batch_executor import BatchExecutor`：
+
+```
+batch_executor → step2_tts → tts_worker → tts_utils
+  → requests → urllib3\response.py line 480
+AttributeError: module 'backports.zstd' has no attribute 'ZstdError'
+```
+
+- **根因在打包收集，不在批量逻辑**：打包目录 `_internal/backports/zstd/` 里只有 `_zstd.cp310-win_amd64.pyd`，缺包体。`urllib3 2.8` 探测到 `backports.zstd` 存在即认定支持 zstd，并在模块级类体里取 `zstd.ZstdError`，导入阶段直接抛 `AttributeError`。而 `_on_batch_execute` 恰好在弹窗确认后导入执行器，异常被 `crash_log` 记入文件，界面表现为“什么都没发生”。
+- **三层修法**：① `src/__init__.py` 加兼容补丁，发现 `backports.zstd` 残缺就把它从搜索路径摘掉，让 urllib3 走“不支持 zstd”分支；② `双语音声工作流.spec` 的 `excludes` 增加 `backports`、`backports.zstd`、`backports.zstd._zstd`，以后重新打包不再带入；③ `_on_batch_execute` 的“导入/构造执行器”整段加 `try/except`，失败时写入运行日志并弹窗提示，杜绝同类异常再次变成“静默无反应”。
+- **验证**：用打包产物里那个 pyd 在本地复现出同一句 `AttributeError`，打补丁后 `import requests` 通过；再用“只有空 `backports` 模块、没有 `backports.zstd`”的目录结构验证导入同样正常（即就地删除残缺目录即可修复已部署版本）。
+- **声笺链路**：工作流侧改用增量进度 `?pending=1`（服务端返回 `workflow_progress_pending` 能力时启用，旧服务自动回退为全量快照），音频下载改为 3 路并行、WAV 流式落盘，缩短“取文本 → 出音频 → 释放临时音频”之间的空档；未升级声笺时行为不变。
+- **测试**：修正两处按旧同步下载写的假响应（补齐 `__enter__` / `iter_content`），全量 **274 passed / 24 subtests passed**。已部署的 EXE 无需重打包——删除/改名 `_internal/backports/zstd` 目录即可；从本版重新执行 `打包.bat` 后该目录不再生成。
+
 ## [v2.2.7] - 2026-10-16
 
 - 更换字幕或配音目录时统一重置下游状态、输出引用和错误信息；保留磁盘文件，并要求重新混音，避免复用旧成品。

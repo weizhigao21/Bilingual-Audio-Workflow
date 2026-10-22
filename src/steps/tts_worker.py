@@ -8,6 +8,7 @@ import uuid
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .tts_cache import AudioCache
+from .local_voice_stream import supports_incremental, run_incremental
 from .tts_logger import logger
 from .tts_profile import profile_matches, save_profile, dir_name
 from .edge_voices import EDGE_TTS_VOICES
@@ -487,6 +488,11 @@ class TTSWorker(QThread):
         if not available_apis:
             self.log_signal.emit("错误：没有可用的API配置")
             self.finished_signal.emit(False)
+            return
+
+        if use_bulk and len(available_apis) == 1 and supports_incremental(available_apis[0]):
+            run_incremental(self, available_apis[0], pending_tasks, completed, completed_weight,
+                            start_time, task_id, task_dir)
             return
 
         if use_bulk:
