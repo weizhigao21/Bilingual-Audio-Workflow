@@ -2,6 +2,18 @@
 
 基于 PyQt6 的三步式配音工作流工具（字幕提取 → 语音合成 → 音频混音）。
 
+## [v2.2.9] - 2026-11-05
+
+**性能优化 P0 批次 + 流式混音取消清理修复**。完整审计、实测数据与后续路线见《性能优化方案.md》。
+
+- **缓存层去写放大**（`tts_cache.py`）：`use_count` 改内存计数 + 批量刷盘，命中路径零 `commit`（本机实测 300 次逐条 commit 775ms → 攒批 2.8ms）；文件 stat / 复制移出全局锁；连接开 WAL + `synchronous=NORMAL`。并发写缓存时只把耗时的文件复制留在锁外，`os.replace` 与 DB 写回收回锁内——Windows 上并发覆盖同一目标会抛 `WinError 5`。
+- **并发参数自洽**（`config.py` / `tts_worker.py`）：默认 `edge_threads` 5 → 8，解决 `5 < edge_max_concurrent 8` 导致请求闸门永远触发不了；运行时池容量取 `min(池, 闸门)`，日志打印有效并发。
+- **信号节流**（新增 `progress_throttle.py`）：小任务（≤20 片段）直通，大任务按 0.15s 进度 / 0.5s ETA / 0.5s 日志聚合，`flush()` 保证终值必达，失败信息立即输出；只接「跳过已存在」与 Edge 完成循环，增量交付的逐条日志契约不变；`_append_log` 按级缓存 `QTextCharFormat`。
+- **修复流式混音取消后临时目录残留**（`stream_mixer.py`）：`AudioSegment.raw_data` 直接持有 mmap，中途取消时异常回溯里的 numpy 视图让 `mapped.close()` 抛 `BufferError` 覆盖原异常 → Windows 删不掉 `source.raw` → CPython `TemporaryDirectory` 的 onerror 把文件路径当目录递归删，报出 `[WinError 267] 目录名称无效` 并残留 `.mix-work-*`。现改为 `mkdtemp` + 最外层 `finally` 显式清理，`_release_mapped_source()` 重试关闭且吞掉 `BufferError`，`_remove_work_dir()` 重试删除且失败只记警告；**清理异常不再改变返回值或错误消息**。
+- **撤回 P0-4 并更正归因**：`Event.wait(timeout)` 在 `set()` 时立即返回，100ms 只是取消响应粒度，不是每次 ffmpeg 调用的固定开销；9 个取消时点 × 两种轮询粒度实测证明残留缺陷与轮询粒度无关。
+- **验证**：新增 `tests/test_perf_p0.py`（10 项守卫），扩充 `tests/test_stream_mixer.py`（参数化取消时点、清理失败不覆盖结果、mmap 释放单测）；破坏性验证注入旧实现可精准触发守卫；全量 **288 passed / 32 subtests passed（47s）**。
+- UI 标题、侧栏及作品信息中的程序版本统一更新为 v2.2.9。已部署的 EXE 需重新执行 `打包.bat` 才能使用本次修复。
+
 ## [v2.2.8] - 2026-10-22
 
 **修复打包版“点批量执行没反应”**。反馈原文：点“开始执行”后对话框关闭，任务不开始、不传给声笺、状态不更新。crash 日志给出唯一线索——`batch_mixin.py` 第 109 行 `from ..steps.batch_executor import BatchExecutor`：

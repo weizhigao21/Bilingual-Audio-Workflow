@@ -99,7 +99,7 @@ class TTSBridgeWorker(QThread):
             "edge_voice": cfg.get("edge_voice", "zh-CN-XiaoxiaoNeural"),
             "edge_rate": cfg.get("edge_rate", "+0%"),
             "edge_volume": cfg.get("edge_volume", "+0%"),
-            "edge_threads": cfg.get("edge_threads", 5),
+            "edge_threads": cfg.get("edge_threads", 8),
             "edge_max_concurrent": cfg.get("edge_max_concurrent", 8),
             "use_bulk_api": cfg.get("use_bulk_api", True),
             "bulk_batch_size": cfg.get("bulk_batch_size", 20),

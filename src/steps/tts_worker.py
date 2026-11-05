@@ -8,6 +8,7 @@ import uuid
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .tts_cache import AudioCache
+from .progress_throttle import ProgressThrottle
 from .local_voice_stream import supports_incremental, run_incremental
 from .tts_logger import logger
 from .tts_profile import profile_matches, save_profile, dir_name
@@ -281,18 +282,25 @@ class TTSWorker(QThread):
 
             pending_tasks = []
             reuse_existing = profile_matches(task_dir, self.config)
+            # 全缓存命中时这里会在瞬间跑完几百个片段，逐条发信号会把主线程
+            # 日志区刷爆。大批量交给节流器，小任务保持逐条语义不变。
+            skipped_throttle = ProgressThrottle(
+                total, self.progress_signal.emit,
+                self.weight_progress_signal.emit, self.eta_signal.emit,
+                self.log_signal.emit,
+            )
             for task in all_tasks:
                 idx, timestamp, text, save_dir, file_mtime = task
                 file_path = generate_filename(idx, timestamp, text, save_dir)
                 if reuse_existing and os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
                     completed += 1
                     completed_weight += len(text)
-                    self.progress_signal.emit(completed)
-                    self.weight_progress_signal.emit(completed_weight)
+                    skipped_throttle.update(completed, completed_weight)
                     file_name = os.path.basename(file_path)
-                    self.log_signal.emit(f"跳过已存在文件: {file_name}")
+                    skipped_throttle.log(f"跳过已存在文件: {file_name}")
                 else:
                     pending_tasks.append(task)
+            skipped_throttle.flush()
 
             start_time = time.time()
             pending_completed = 0
@@ -391,17 +399,32 @@ class TTSWorker(QThread):
         #   - 全局并发上限(edge_max_concurrent)：真正发出的并发请求数上限，
         #     由 tts_utils 的请求闸门(_edge_acquire/_edge_release)控制，
         #     池内多余任务会在闸门排队，避免触发微软服务限流。
-        pool_workers = max(1, int(self.config.get("edge_threads", 5)))
         global_max = max(1, int(self.config.get("edge_max_concurrent", 8)))
+        configured_pool = max(1, int(self.config.get("edge_threads", 8)))
+        # 池容量不得超过闸门：多出来的线程只会卡在 _edge_acquire() 排队空转
+        # （历史配置「池 12 / 闸门 8」就是这样）。反过来池 < 闸门时闸门永不
+        # 触发，「全局并发上限」形同虚设（旧默认 5/8）。有效并发取较小值并
+        # 明确打印，让用户看得见自己到底开了几路。
+        pool_workers = max(1, min(configured_pool, global_max))
         # 容量变化时按新容量重建共享池
         executor = get_edge_executor(pool_workers)
         set_edge_max_concurrent(global_max)
         self.log_signal.emit(
             f"使用Edge TTS模式，声音: {voice}，"
-            f"共享线程池: {pool_workers}，全局并发上限: {global_max}"
+            f"有效并发: {pool_workers}（线程池 {configured_pool} / 闸门 {global_max}）"
         )
+        if configured_pool > global_max:
+            self.log_signal.emit(
+                "提示：线程池数量大于全局并发上限，多余线程会在闸门排队；"
+                "可把线程池数量调到与并发上限一致。"
+            )
 
         total = len(pending_tasks)
+        throttle = ProgressThrottle(
+            completed + total, self.progress_signal.emit,
+            self.weight_progress_signal.emit, self.eta_signal.emit,
+            self.log_signal.emit,
+        )
         pending_completed = 0
         failures = 0
         progress_lock = threading.Lock()
@@ -436,10 +459,11 @@ class TTSWorker(QThread):
                 task = futures[future]
                 try:
                     success, msg = future.result()
-                    self.log_signal.emit(msg)
+                    # 成功片段聚合输出；失败/异常立即输出，不能吞掉。
+                    throttle.log(msg, immediate=not success)
                 except Exception as e:
                     success = False
-                    self.log_signal.emit(f"异常: {task[2][:10]}... - {e}")
+                    throttle.log(f"异常: {task[2][:10]}... - {e}", immediate=True)
                 if not success:
                     failures += 1
 
@@ -447,15 +471,16 @@ class TTSWorker(QThread):
                     completed += 1
                     completed_weight += len(task[2])
                     pending_completed += 1
-                    self.progress_signal.emit(completed)
-                    self.weight_progress_signal.emit(completed_weight)
-
                     elapsed = time.time() - start_time
+                    eta_text = ""
                     if pending_completed > 0:
                         avg_time = elapsed / pending_completed
                         remaining = avg_time * (total - pending_completed)
-                        self.eta_signal.emit(format_eta(remaining))
+                        eta_text = format_eta(remaining)
+                    throttle.update(completed, completed_weight, eta_text)
 
+            # 补发终值与最后一批聚合日志，保证进度条不会停在 99%。
+            throttle.flush()
             self.log_signal.emit("全部任务完成")
             self.log_signal.emit(f"任务ID: {task_id}")
             self.log_signal.emit(f"任务文件保存位置: {task_dir}")

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """长音频磁盘映射混音：整段 PCM 与累加缓冲不进入常驻 Python 堆。"""
+import gc
 import mmap
 import os
+import shutil
 import tempfile
+import time
 
 from pydub import AudioSegment
 
@@ -14,6 +17,45 @@ from .audio_utils.ffmpeg_utils import (
     decode_audio_to_pcm, export_pcm_file, export_pcm_wav,
 )
 from .audio_metadata import mix_metadata_options, remember_mix_metadata
+
+
+def _release_mapped_source(mapped):
+    """尽力关闭 mmap，且绝不把 BufferError 抛回调用方。
+
+    AudioSegment.raw_data 直接引用 mmap 对象；取消/异常路径上，异常回溯里的
+    numpy 视图可能仍持有缓冲区导出指针，此时 close() 会抛 BufferError。若把它
+    抛出去会覆盖原始的「用户已停止处理」，而 Windows 上未解除映射的 source.raw
+    又删不掉，TemporaryDirectory 的 onerror 会把文件路径当目录递归删除，最终
+    报出误导性的 WinError 267 并残留 .mix-work-* 目录。
+    """
+    if mapped is None or getattr(mapped, "closed", False):
+        return True
+    for _ in range(3):
+        gc.collect()
+        try:
+            mapped.close()
+            return True
+        except BufferError:
+            continue
+    return False
+
+
+def _remove_work_dir(work_dir, log):
+    """删除临时工作目录；清理失败只警告，不改变混音的成功/失败结果。"""
+    if not work_dir:
+        return
+    for attempt in range(5):
+        if not os.path.isdir(work_dir):
+            return
+        try:
+            shutil.rmtree(work_dir)
+            return
+        except OSError as exc:
+            if attempt == 4:
+                log(f"[音频混音] 警告：临时目录清理失败: {work_dir} - {exc}")
+                return
+            gc.collect()
+            time.sleep(0.02)
 
 
 def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
@@ -39,91 +81,101 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
     output_format = os.path.splitext(final_output)[1].lstrip('.').lower()
     tags, metadata_options = mix_metadata_options(cfg, task, final_output)
     export_path = None
+    work_dir = None
+    mapped_source = None
     try:
         log(f"[音频混音] 启用长音频分块处理: {duration / 60:.1f} 分钟")
-        with tempfile.TemporaryDirectory(dir=output_folder, prefix=".mix-work-") as work_dir:
-            source_pcm = os.path.join(work_dir, "source.raw")
-            accumulator = os.path.join(work_dir, "accumulator.raw")
-            mixed_pcm = os.path.join(work_dir, "mixed.raw")
-            progress(5)
-            decode_audio_to_pcm(task.source_path, source_pcm, stop_check=stop_check)
-            check_stop()
-            if os.path.getsize(source_pcm) == 0:
-                raise ValueError("源文件没有可解码的音频")
-            progress(15)
-            with open(source_pcm, "rb") as source_file:
-                mapped = mmap.mmap(source_file.fileno(), 0, access=mmap.ACCESS_READ)
-                try:
-                    original = AudioSegment(mapped, sample_width=4,
-                                            frame_rate=source_rate, channels=2)
-                    angles = {}
-                    if cfg.get("channel_detect", True):
-                        log("[音频混音] 检测声道位置...")
-                        angles = detect_angles_parallel(
-                            original, clips,
-                            angles_from_config(cfg),
-                            max_workers=cfg.get("thread_count", 4),
-                        )
-                    progress(25)
-                    mix_items = [
-                        (os.path.join(task.step2_output, clip["filename"]),
-                         clip["timestamp_ms"], angles.get(clip["filename"], 180))
-                        for clip in clips
-                    ]
-                    log(f"[音频混音] 分块合成 {len(mix_items)} 个配音片段...")
-                    mix_with_numpy(
-                        original, mix_items,
-                        volume_db=cfg.get("volume_db", 0.0),
-                        auto_volume=cfg.get("auto_volume", "off"),
-                        align_onset=cfg.get("align_onset", False),
-                        content_alignment=cfg.get("content_alignment", False),
-                        peak_mode=cfg.get("peak_mode", "peak"),
-                        high_quality=cfg.get("high_quality_resample", True),
-                        stop_check=stop_check,
-                        output_path=mixed_pcm,
-                        accumulator_path=accumulator,
-                        item_callback=lambda done, total: progress(25 + int(done * 45 / total)),
-                    )
-                    del original
-                finally:
-                    mapped.close()
-            check_stop()
-            progress(85)
-            with tempfile.NamedTemporaryFile(dir=output_folder, prefix=".mix-",
-                                             suffix="." + output_format, delete=False) as tmp:
-                export_path = tmp.name
-            bitrate = cfg.get("audio_bitrate", "192k")
-            output_rate = int(cfg.get("audio_sample_rate", 44100))
-            channels = int(cfg.get("audio_channels", 2))
-            high_quality = cfg.get("high_quality_resample", True)
-            log("[音频混音] 分块导出中...")
-            if output_format == "wav":
-                export_pcm_wav(
-                    mixed_pcm, export_path, source_rate, output_rate, channels,
-                    int(cfg.get("wav_bit_depth", 16)), work_dir,
-                    high_quality=high_quality, stop_check=stop_check,
-                )
-            else:
-                export_pcm_file(
-                    mixed_pcm, task.source_path if is_video else None,
-                    export_path, output_format, source_rate, bitrate, output_rate,
-                    channels, high_quality=high_quality, stop_check=stop_check,
-                    metadata_options=metadata_options,
-                )
-            check_stop()
-            os.replace(export_path, final_output)
-            export_path = None
-            task.force_remix = False
+        work_dir = tempfile.mkdtemp(dir=output_folder, prefix=".mix-work-")
+        source_pcm = os.path.join(work_dir, "source.raw")
+        accumulator = os.path.join(work_dir, "accumulator.raw")
+        mixed_pcm = os.path.join(work_dir, "mixed.raw")
+        progress(5)
+        decode_audio_to_pcm(task.source_path, source_pcm, stop_check=stop_check)
+        check_stop()
+        if os.path.getsize(source_pcm) == 0:
+            raise ValueError("源文件没有可解码的音频")
+        progress(15)
+        with open(source_pcm, "rb") as source_file:
+            mapped_source = mmap.mmap(source_file.fileno(), 0, access=mmap.ACCESS_READ)
             try:
-                remember_mix_metadata(task, tags)
-            except OSError as exc:
-                log(f"[音频混音] 警告：任务记录写入失败: {exc}")
-            progress(100)
-            log(f"[音频混音] 完成: {final_output}")
-            return True, final_output
+                original = AudioSegment(mapped_source, sample_width=4,
+                                        frame_rate=source_rate, channels=2)
+                angles = {}
+                if cfg.get("channel_detect", True):
+                    log("[音频混音] 检测声道位置...")
+                    angles = detect_angles_parallel(
+                        original, clips,
+                        angles_from_config(cfg),
+                        max_workers=cfg.get("thread_count", 4),
+                    )
+                progress(25)
+                mix_items = [
+                    (os.path.join(task.step2_output, clip["filename"]),
+                     clip["timestamp_ms"], angles.get(clip["filename"], 180))
+                    for clip in clips
+                ]
+                log(f"[音频混音] 分块合成 {len(mix_items)} 个配音片段...")
+                mix_with_numpy(
+                    original, mix_items,
+                    volume_db=cfg.get("volume_db", 0.0),
+                    auto_volume=cfg.get("auto_volume", "off"),
+                    align_onset=cfg.get("align_onset", False),
+                    content_alignment=cfg.get("content_alignment", False),
+                    peak_mode=cfg.get("peak_mode", "peak"),
+                    high_quality=cfg.get("high_quality_resample", True),
+                    stop_check=stop_check,
+                    output_path=mixed_pcm,
+                    accumulator_path=accumulator,
+                    item_callback=lambda done, total: progress(25 + int(done * 45 / total)),
+                )
+            finally:
+                # 断开本帧对 AudioSegment（进而对 mmap）的引用；关闭失败不覆盖原异常。
+                original = None
+                _release_mapped_source(mapped_source)
+        check_stop()
+        progress(85)
+        with tempfile.NamedTemporaryFile(dir=output_folder, prefix=".mix-",
+                                         suffix="." + output_format, delete=False) as tmp:
+            export_path = tmp.name
+        bitrate = cfg.get("audio_bitrate", "192k")
+        output_rate = int(cfg.get("audio_sample_rate", 44100))
+        channels = int(cfg.get("audio_channels", 2))
+        high_quality = cfg.get("high_quality_resample", True)
+        log("[音频混音] 分块导出中...")
+        if output_format == "wav":
+            export_pcm_wav(
+                mixed_pcm, export_path, source_rate, output_rate, channels,
+                int(cfg.get("wav_bit_depth", 16)), work_dir,
+                high_quality=high_quality, stop_check=stop_check,
+            )
+        else:
+            export_pcm_file(
+                mixed_pcm, task.source_path if is_video else None,
+                export_path, output_format, source_rate, bitrate, output_rate,
+                channels, high_quality=high_quality, stop_check=stop_check,
+                metadata_options=metadata_options,
+            )
+        check_stop()
+        os.replace(export_path, final_output)
+        export_path = None
+        task.force_remix = False
+        try:
+            remember_mix_metadata(task, tags)
+        except OSError as exc:
+            log(f"[音频混音] 警告：任务记录写入失败: {exc}")
+        progress(100)
+        log(f"[音频混音] 完成: {final_output}")
+        return True, final_output
     except Exception as exc:
         log(f"[音频混音] 分块处理失败: {exc}")
         return False, str(exc)
     finally:
+        # 业务异常已在上面消化：此时异常回溯释放，再关一次 mmap，Windows 才能
+        # 删除 source.raw。清理异常一律降级为日志，绝不覆盖业务返回值或错误消息。
+        _release_mapped_source(mapped_source)
         if export_path and os.path.exists(export_path):
-            os.unlink(export_path)
+            try:
+                os.unlink(export_path)
+            except OSError as exc:
+                log(f"[音频混音] 警告：临时成品清理失败: {exc}")
+        _remove_work_dir(work_dir, log)

@@ -71,7 +71,10 @@ DEFAULT_CONFIG = {
         "edge_voice": "zh-CN-XiaoxiaoNeural",
         "edge_rate": "+0%",
         "edge_volume": "+0%",
-        "edge_threads": 5,
+        # 线程池容量与请求闸门取同一个值：池 < 闸门时闸门永不触发（旧默认
+        # 5/8 让「全局并发上限」形同虚设），池 > 闸门时多余线程空转排队。
+        # 运行时 TTSWorker 仍按 min(池, 闸门) 兜底兼容旧配置文件。
+        "edge_threads": 8,
         "edge_max_concurrent": 8,
         "pipeline_tts_workers": 2,
         "use_bulk_api": True,

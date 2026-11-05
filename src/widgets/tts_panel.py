@@ -79,8 +79,8 @@ class TTSConfigPanel(QWidget):
         self.threads_spin.setRange(1, 20)
         self.threads_spin.setToolTip(
             "Edge 模式全局共享线程池的线程数（所有音频共用同一个池，\n"
-            "不随音频数叠加）。同时可运行的任务数。\n"
-            "实际发出的请求数另由「全局并发上限」闸门控制。"
+            "不随音频数叠加）。有效并发 = min(线程池, 全局并发上限)。\n"
+            "建议与「全局并发上限」设为同一个值（默认 8）。"
         )
         self.threads_spin.valueChanged.connect(self._save)
         self.edge_group.add_row("线程池数量", "所有音频共享的合成线程池",
@@ -90,8 +90,8 @@ class TTSConfigPanel(QWidget):
         self.max_concurrent_spin.setRange(1, 20)
         self.max_concurrent_spin.setToolTip(
             "Edge 模式真正发出的并发请求数上限（请求闸门）。\n"
-            "超过线程池数量的任务会在闸门排队。过高会触发微软服务限流\n"
-            "（Cannot connect to ...bing.com:443），建议 5-8"
+            "线程池超过它时多余线程只会排队空转；线程池小于它时\n"
+            "本设置不生效。有效并发 = min(两者)，建议两项都设 8。"
         )
         self.max_concurrent_spin.valueChanged.connect(self._save)
         self.edge_group.add_row("全局并发上限", "请求闸门，防止触发限流",
@@ -187,7 +187,7 @@ class TTSConfigPanel(QWidget):
             self.voice_combo.setCurrentIndex(idx)
             self.rate_combo.setCurrentText(cfg.get("edge_rate", "+0%"))
             self.volume_combo.setCurrentText(cfg.get("edge_volume", "+0%"))
-            self.threads_spin.setValue(cfg.get("edge_threads", 5))
+            self.threads_spin.setValue(cfg.get("edge_threads", 8))
             self.max_concurrent_spin.setValue(cfg.get("edge_max_concurrent", 8))
             self.pipeline_tts_spin.setValue(cfg.get("pipeline_tts_workers", 2))
             # api 参数

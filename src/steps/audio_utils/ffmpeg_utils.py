@@ -198,6 +198,12 @@ def _run_ffmpeg(cmd, stop_check=None, input_data=None):
     worker = threading.Thread(target=communicate, daemon=True)
     worker.start()
     try:
+        # Event.wait 会在 communicate 线程 set() 完成时立即返回，并不会等满
+        # timeout：这里的 0.1 只是 stop_check（取消）的响应粒度，不是每次
+        # ffmpeg 调用的固定开销。别为了「省 100ms」盲目调小——它只会把
+        # 取消检查变密、改变按调用次数驱动的取消时序，没有任何吞吐收益。
+        # 快速取消曾暴露 stream_mixer 的 mmap 清理缺陷（与轮询粒度无关，
+        # 现已修复）；细节见《性能优化方案.md》第零节。
         while not completed.wait(0.1):
             if stop_check is not None and stop_check():
                 raise RuntimeError("用户已停止处理")

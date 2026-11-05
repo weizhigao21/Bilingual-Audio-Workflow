@@ -360,8 +360,16 @@ class WorkflowMainWindow(
         elif any(k in low for k in ("完成", "成功", "done", "success")):
             level = "success"
 
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(LOG_COLORS[level]))
+        # 分级色只有四种，格式对象按级缓存：批量合成时原本每条日志都新建
+        # 一个 QTextCharFormat + QColor，属于纯浪费。
+        formats = getattr(self, "_log_formats", None)
+        if formats is None:
+            formats = self._log_formats = {}
+        fmt = formats.get(level)
+        if fmt is None:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(LOG_COLORS[level]))
+            formats[level] = fmt
         cursor = self.log_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(line + "\n", fmt)

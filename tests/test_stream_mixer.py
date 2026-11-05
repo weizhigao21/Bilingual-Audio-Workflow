@@ -12,6 +12,7 @@ import numpy as np
 from pydub import AudioSegment
 
 from src.steps.step3_mixer import mix_single_task
+from src.steps.stream_mixer import _release_mapped_source
 from src.task_manager import TaskInfo
 from src.steps.audio_utils import clear_mix_cache
 from src.version import APP_VERSION
@@ -111,14 +112,76 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(list(self.root.glob('.mix-*')),[])
 
     def test_stop_during_streamed_mix_cleans_spool(self):
+        # 覆盖取消落在解码/映射/混音/导出各阶段的时点。stop>3 曾必现
+        # WinError 267 + .mix-work-* 残留：mmap 关闭失败覆盖了原始异常。
+        for stop_after in (1, 2, 3, 4, 5, 6, 8, 12):
+            with self.subTest(stop_after=stop_after):
+                self.cfg.mixer_cfg['streaming_threshold_minutes']=0
+                calls=[0]
+                def stop():
+                    calls[0]+=1
+                    return calls[0]>stop_after
+                logs=[]
+                ok,msg=mix_single_task(self.task,self.cfg,
+                                       log_callback=logs.append,stop_check=stop)
+                self.assertFalse(ok)
+                self.assertEqual(msg,'用户已停止处理')
+                self.assertEqual(list(self.root.glob('.mix-*')),[])
+                self.assertFalse([l for l in logs if '清理失败' in l])
+
+    def test_cleanup_failure_does_not_override_successful_mix(self):
         self.cfg.mixer_cfg['streaming_threshold_minutes']=0
-        calls=[0]
-        def stop():
-            calls[0]+=1
-            return calls[0]>5
-        ok,msg=mix_single_task(self.task,self.cfg,stop_check=stop)
+        logs=[]
+        with patch('src.steps.stream_mixer.shutil.rmtree',
+                   side_effect=OSError('locked by another process')):
+            ok,path=mix_single_task(self.task,self.cfg,log_callback=logs.append)
+        self.assertTrue(ok,path)
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(any('临时目录清理失败' in l for l in logs))
+        for d in self.root.glob('.mix-work-*'):
+            shutil.rmtree(d,ignore_errors=True)
+
+    def test_cleanup_failure_keeps_original_export_error(self):
+        self.cfg.mixer_cfg.update(output_format='mp3',streaming_threshold_minutes=0)
+        logs=[]
+        with patch('src.steps.stream_mixer.export_pcm_file',
+                   side_effect=RuntimeError('encoder error')), \
+             patch('src.steps.stream_mixer.shutil.rmtree',
+                   side_effect=OSError('locked by another process')):
+            ok,msg=mix_single_task(self.task,self.cfg,log_callback=logs.append)
         self.assertFalse(ok)
-        self.assertEqual(list(self.root.glob('.mix-*')),[])
+        self.assertEqual(msg,'encoder error')
+        self.assertTrue(any('临时目录清理失败' in l for l in logs))
+        for d in self.root.glob('.mix-work-*'):
+            shutil.rmtree(d,ignore_errors=True)
+
+
+class MappedSourceTests(unittest.TestCase):
+    def test_buffer_error_is_never_raised_to_caller(self):
+        class FakeMMap:
+            closed=False
+            def __init__(self): self.calls=0
+            def close(self):
+                self.calls+=1
+                raise BufferError('cannot close exported pointers exist')
+        fake=FakeMMap()
+        self.assertFalse(_release_mapped_source(fake))
+        self.assertEqual(fake.calls,3)
+        self.assertTrue(_release_mapped_source(None))
+
+    def test_retries_until_exports_are_released(self):
+        class FakeMMap:
+            closed=False
+            def __init__(self): self.calls=0
+            def close(self):
+                self.calls+=1
+                if self.calls<2: raise BufferError('busy')
+                self.closed=True
+        fake=FakeMMap()
+        self.assertTrue(_release_mapped_source(fake))
+        self.assertEqual(fake.calls,2)
+        self.assertTrue(_release_mapped_source(fake))
+        self.assertEqual(fake.calls,2)
 
 
 if __name__=='__main__':

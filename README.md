@@ -1,8 +1,10 @@
-# 双语音声工作流 v2.2.8
+# 双语音声工作流 v2.2.9
 
 [![GitHub](https://img.shields.io/badge/GitHub-weizhigao21%2FBilingual--Audio--Workflow-blue)](https://github.com/weizhigao21/Bilingual-Audio-Workflow)
 
 基于 PyQt6 的三步式配音工作流工具：**字幕提取 → 语音合成 → 音频混音**，一键批量处理，输出双语配音视频/音频。
+
+**v2.2.9（2026-11-05）**：性能优化 P0 批次 + 流式混音取消清理修复。缓存层去掉逐命中 SQLite `commit`、把文件 stat/复制移出全局锁并开启 WAL；`edge_threads` 默认值与请求闸门自洽（5 → 8），运行时池容量取 `min(池, 闸门)`；新增 `ProgressThrottle` 节流大任务的进度/ETA/日志信号（小任务保持逐条语义）。修复长音频混音中途取消后 `.mix-work-*` 临时目录残留：根因是 `AudioSegment` 持有 mmap 时 `close()` 抛 `BufferError` 覆盖原异常，Windows 删不掉 `source.raw` 又被 `TemporaryDirectory` 的 onerror 变成 WinError 267；现改为显式工作目录 + 双层 `finally` 清理，清理失败只记警告、不污染业务结果。原方案里「ffmpeg 轮询 100ms → 10ms」经实测无吞吐收益，已撤回。全量 **288 passed / 32 subtests passed**。详细审计与后续路线见 [性能优化方案.md](性能优化方案.md)。
 
 **v2.2.8（2026-10-22）**：修复打包版“点批量执行没反应”。打包目录里残缺的 `backports.zstd`（只有 `_zstd` 扩展、缺包体）让 `urllib3 2.8` 在导入时读取 `zstd.ZstdError` 抛 `AttributeError`，而这一步正好发生在 `_on_batch_execute` 导入执行器时，异常只进了 crash 日志，界面没有任何提示。现在：`src/__init__.py` 会剔除残缺的 `backports.zstd`，打包 `.spec` 直接排除它，批量启动失败也会写入运行日志并弹窗。同一版本工作流侧接入声笺的增量进度 `?pending=1` 与 3 路并行流式下载（未升级声笺时自动回退）。全量 **274 passed / 24 subtests passed**。已部署的 EXE 把 `_internal/backports/zstd` 改名即可生效，重新 `打包.bat` 后不再生成。
 
