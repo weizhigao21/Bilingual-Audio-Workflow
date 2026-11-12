@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TTS 配置面板与 API 服务器列表编辑对话框（声笺风格）。
+"""配音配置面板与 API 服务器列表编辑对话框（声笺风格）。
 
 模式使用紧凑分段按钮切换（Edge TTS / API 服务器），选中项白底细边框；
 两组参数分别放在白色设置卡片中。修改配置后自动保存并发出 config_changed。
@@ -17,7 +17,7 @@ from .settings_group import SettingsGroup, SegmentedControl
 
 
 class TTSConfigPanel(QWidget):
-    """TTS 配置面板：模式选择、Edge 参数、API 参数。"""
+    """配音配置面板：模式选择、Edge 参数、API 参数。"""
 
     config_changed = pyqtSignal()
     log_message = pyqtSignal(str)
@@ -35,7 +35,7 @@ class TTSConfigPanel(QWidget):
 
         # 模式：紧凑分段按钮（2 个互斥选项）
         mode_row = QHBoxLayout()
-        mode_label = QLabel("合成模式")
+        mode_label = QLabel("配音模式")
         mode_label.setProperty("role", "section")
         mode_row.addWidget(mode_label)
         mode_row.addStretch(1)
@@ -78,9 +78,9 @@ class TTSConfigPanel(QWidget):
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(1, 20)
         self.threads_spin.setToolTip(
-            "Edge 模式全局共享线程池的线程数（所有音频共用同一个池，\n"
-            "不随音频数叠加）。有效并发 = min(线程池, 全局并发上限)。\n"
-            "建议与「全局并发上限」设为同一个值（默认 8）。"
+            "所有配音共用一个合成线程池（不随音频数叠加）。\n"
+            "实际并发路数由本项与「全局并发上限」中较小的一方决定；\n"
+            "建议两项设为同一个值（默认 8）。"
         )
         self.threads_spin.valueChanged.connect(self._save)
         self.edge_group.add_row("线程池数量", "所有音频共享的合成线程池",
@@ -89,9 +89,9 @@ class TTSConfigPanel(QWidget):
         self.max_concurrent_spin = QSpinBox()
         self.max_concurrent_spin.setRange(1, 20)
         self.max_concurrent_spin.setToolTip(
-            "Edge 模式真正发出的并发请求数上限（请求闸门）。\n"
-            "线程池超过它时多余线程只会排队空转；线程池小于它时\n"
-            "本设置不生效。有效并发 = min(两者)，建议两项都设 8。"
+            "同时真正发出的合成请求数上限，防止触发微软限流。\n"
+            "实际并发路数由本项与「线程池数量」中较小的一方决定；\n"
+            "建议两项设为同一个值（默认 8）。"
         )
         self.max_concurrent_spin.valueChanged.connect(self._save)
         self.edge_group.add_row("全局并发上限", "请求闸门，防止触发限流",
@@ -100,7 +100,7 @@ class TTSConfigPanel(QWidget):
         self.pipeline_tts_spin = QSpinBox()
         self.pipeline_tts_spin.setRange(1, 10)
         self.pipeline_tts_spin.setToolTip(
-            "流水线模式下同时进行语音生成的音频数（任务级并行）。\n"
+            "流水线模式下同时进行配音的音频数（任务级并行）。\n"
             "设 1 = 按音频逐个生成语音；2 = 最多 2 个音频同时生成。\n"
             "片段级并发由「全局并发上限」统一控制（共享线程池，不叠加）。"
         )

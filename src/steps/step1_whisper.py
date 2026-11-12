@@ -11,6 +11,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..config import WorkflowConfig, WHISPER_MEDIA_SUFFIXES
 from ..task_manager import TaskInfo
+from . import perf
 from .whisper_progress import WhisperProgress, show_in_gui
 
 
@@ -77,11 +78,16 @@ class WhisperWorker(QThread):
                 pass
 
     def run(self):
+        timer = perf.task_timer(f"step1-{os.path.basename(self.task.source_path)}")
         try:
-            self._run_impl()
+            with perf.span("字幕提取"):
+                self._run_impl()
         except Exception as e:
             self.log_signal.emit(f"[字幕提取] 异常: {e}")
             self._emit_finished(False, str(e))
+        finally:
+            timer.report()
+            perf.attach(None)
 
     def _run_impl(self):
         whisper_dir = self.config.whisper_dir
@@ -459,8 +465,10 @@ class WhisperBatchWorker(QThread):
         self.finished_signal.emit(success, failed)
 
     def run(self):
+        timer = perf.task_timer(f"step1-batch({len(self.tasks)})")
         try:
-            self._run_impl()
+            with perf.span("字幕提取"):
+                self._run_impl()
         except Exception as exc:
             self.log_signal.emit(f"[字幕批量] 异常: {exc}")
             for task in self.tasks:
@@ -468,6 +476,8 @@ class WhisperBatchWorker(QThread):
             success = sum(self._reported.values())
             self.finished_signal.emit(success, len(self._reported) - success)
         finally:
+            timer.report()
+            perf.attach(None)
             if self._process:
                 try:
                     self._process.terminate()

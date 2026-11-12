@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""步骤2：语音生成。"""
+"""步骤2：配音。"""
 import os
 
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
@@ -63,12 +63,12 @@ class TTSBridgeWorker(QThread):
         try:
             self._run_impl()
         except Exception as e:
-            self.log_signal.emit(f"[语音生成] 异常: {e}")
+            self.log_signal.emit(f"[配音] 异常: {e}")
             self._emit_finished(False, str(e))
 
     def _run_impl(self):
         if self._stop_flag or self.isInterruptionRequested():
-            self._emit_finished(False, "语音生成已取消")
+            self._emit_finished(False, "配音已取消")
             return
         # 检查字幕文件
         lrc_path = self.task.step1_output
@@ -78,7 +78,7 @@ class TTSBridgeWorker(QThread):
 
         cfg = prepare_workflow_config(self.config)
         if self._stop_flag or self.isInterruptionRequested():
-            self._emit_finished(False, "语音生成已取消")
+            self._emit_finished(False, "配音已取消")
             return
 
         # 目录名 = md5(字幕内容 | 配音配置签名)：换模型/声音会落到不同目录，
@@ -105,12 +105,12 @@ class TTSBridgeWorker(QThread):
             "bulk_batch_size": cfg.get("bulk_batch_size", 20),
         }
 
-        self.log_signal.emit(f"[语音生成] 启动: {os.path.basename(lrc_path)}")
-        self.log_signal.emit(f"[语音生成] 模式: {tts_config['tts_mode']}")
+        self.log_signal.emit(f"[配音] 启动: {os.path.basename(lrc_path)}")
+        self.log_signal.emit(f"[配音] 模式: {tts_config['tts_mode']}")
         if tts_config["tts_mode"] == "edge":
-            self.log_signal.emit(f"[语音生成] 声音: {tts_config['edge_voice']}")
+            self.log_signal.emit(f"[配音] 声音: {tts_config['edge_voice']}")
             self.log_signal.emit(
-                f"[语音生成] 语速={tts_config['edge_rate']}, "
+                f"[配音] 语速={tts_config['edge_rate']}, "
                 f"音量={tts_config['edge_volume']}"
             )
         else:
@@ -118,7 +118,7 @@ class TTSBridgeWorker(QThread):
             apis = tts_config["api_configs"]
             api_name = apis[idx].get("name", "?") if 0 <= idx < len(apis) else "?"
             self.log_signal.emit(
-                f"[语音生成] API: {api_name}, "
+                f"[配音] API: {api_name}, "
                 f"批量={tts_config['bulk_batch_size']}, "
                 f"多API轮询={tts_config['use_multi_api']}"
             )
@@ -157,7 +157,7 @@ class TTSBridgeWorker(QThread):
         # 所有内部回调都用 DirectConnection，完成信号即使很快发出也不会
         # 早于事件循环启动而丢失；直接等待线程真正退出即可。
         if self._stop_flag:
-            self._emit_finished(False, "语音生成已取消")
+            self._emit_finished(False, "配音已取消")
             return
         self._tts_worker.start()
         self._tts_worker.wait()
@@ -226,7 +226,7 @@ class TTSBridgeWorker(QThread):
         task_dir = os.path.join(self.task.workspace_root, self._subtitle_md5)
 
         if os.path.isdir(task_dir):
-            wavs = [f for f in os.listdir(task_dir) if f.endswith(".wav")]
+            wavs = [f for f in os.listdir(task_dir) if f.endswith((".wav", ".mp3"))]
             output_dir = task_dir if wavs else ""
         else:
             output_dir = ""
@@ -235,5 +235,5 @@ class TTSBridgeWorker(QThread):
             self._emit_finished(False, "TTS 完成但未找到输出目录")
             return
 
-        self.log_signal.emit(f"[语音生成] 完成: {output_dir}")
+        self.log_signal.emit(f"[配音] 完成: {output_dir}")
         self._emit_finished(True, output_dir)

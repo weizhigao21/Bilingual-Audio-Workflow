@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """主窗口 Mixin：全局配置与三个步骤的配置对话框。
 
-按 UI_STYLE.md「设置页分组」：顶部使用下划线标签（常规/字幕提取/语音生成/
-音频混音），激活标签使用 2 px 深色底边，不填充大色块；一组相关设置放在同一
+按 UI_STYLE.md「设置页分组」：顶部使用下划线标签（常规/字幕提取/配音/
+混音），激活标签使用 2 px 深色底边，不填充大色块；一组相关设置放在同一
 白色容器内，行间细线分隔。三个步骤的配置面板内嵌其中，修改变更即自动保存。
 """
 import os
@@ -93,7 +93,7 @@ class GeneralSettingsPage(QWidget):
 
 
 class SettingsDialog(QDialog):
-    """统一设置弹窗：下划线标签切换 常规/字幕提取/语音生成/音频混音。"""
+    """统一设置弹窗：下划线标签切换 常规/字幕提取/配音/混音。"""
 
     def __init__(self, config: WorkflowConfig, parent=None, initial_tab: int = 0):
         super().__init__(parent)
@@ -115,7 +115,7 @@ class SettingsDialog(QDialog):
         layout.addSpacing(10)
 
         self.tab_bar = QTabBar()
-        for name in ("常规", "字幕提取", "语音生成", "音频混音"):
+        for name in ("常规", "字幕提取", "配音", "混音"):
             self.tab_bar.addTab(name)
         self.tab_bar.setCurrentIndex(max(0, initial_tab))
         self.tab_bar.setDrawBase(False)   # 不画大色块底边，只保留选中项 2px 深色下边线
@@ -162,11 +162,11 @@ class ConfigDialogMixin:
             self._append_log("[配置] 已更新")
 
     def _on_open_tts_config(self):
-        """打开设置弹窗并定位到语音生成页。配置变更自动保存。"""
+        """打开设置弹窗并定位到配音页。配置变更自动保存。"""
         SettingsDialog(self.config, self, initial_tab=2).exec()
 
     def _on_open_mixer_config(self):
-        """打开设置弹窗并定位到音频混音页。配置变更自动保存。"""
+        """打开设置弹窗并定位到混音页。配置变更自动保存。"""
         SettingsDialog(self.config, self, initial_tab=3).exec()
 
     def _on_open_whisper_config(self):
@@ -174,7 +174,7 @@ class ConfigDialogMixin:
         SettingsDialog(self.config, self, initial_tab=1).exec()
 
     def _on_tts_config_changed(self):
-        """TTS 配置变化时记录日志。"""
+        """配音配置变化时记录日志。"""
         from ..steps.tts_profile import profile_matches
         from ..task_manager import STEP_DONE, STEP_SKIPPED, STEP_PENDING
         for task in self.task_queue.tasks:
@@ -190,28 +190,39 @@ class ConfigDialogMixin:
         mode = self.config.tts_cfg.get("tts_mode", "edge")
         if mode == "edge":
             voice = self.config.tts_cfg.get("edge_voice", "")
-            self._append_log(f"[TTS配置] Edge模式, 声音={voice}")
+            self._append_log(f"[配音配置] Edge模式, 声音={voice}")
         else:
             idx = self.config.tts_cfg.get("current_api_index", 0)
             apis = self.config.tts_cfg.get("api_configs", [])
             api_name = apis[idx].get("name", "?") if 0 <= idx < len(apis) else "?"
-            self._append_log(f"[TTS配置] API模式, 当前API={api_name}")
+            self._append_log(f"[配音配置] API模式, 当前API={api_name}")
 
     def _on_mixer_config_changed(self):
         """混音配置变化时记录日志。"""
         cfg = self.config.mixer_cfg
+        # 值也翻成用户看得懂的说法，键名/枚举值不进日志区
+        volume_mode = {"off": "关闭", "fixed": "固定增益",
+                       "auto": "自动匹配响度"}.get(
+            cfg.get('auto_volume', 'fixed'), cfg.get('auto_volume', 'fixed'))
         self._append_log(
             f"[混音配置] 格式={cfg.get('output_format', 'mp4')}, "
             f"音量={cfg.get('volume_db', 0.0)}dB, "
-            f"模式={cfg.get('auto_volume', 'fixed')}"
+            f"模式={volume_mode}"
         )
 
     def _on_whisper_config_changed(self):
         """字幕配置变化时记录日志。"""
         cfg = self.config.whisper_cfg
+        device = {"auto": "自动", "cpu": "CPU", "cuda": "CUDA（GPU）"}.get(
+            cfg.get('device', 'auto'), cfg.get('device', 'auto'))
+        compute = {"auto": "自动", "int8": "int8（最快/省显存）",
+                   "int8_float16": "int8_float16（混合精度）",
+                   "float16": "float16（平衡）",
+                   "float32": "float32（最精确）"}.get(
+            cfg.get('compute_type', 'auto'), cfg.get('compute_type', 'auto'))
         self._append_log(
-            f"[字幕配置] 设备={cfg.get('device', 'auto')}, "
-            f"精度={cfg.get('compute_type', 'auto')}, "
+            f"[字幕配置] 设备={device}, "
+            f"精度={compute}, "
             f"格式={cfg.get('sub_formats', 'lrc')}, "
             f"VAD阈值={cfg.get('vad_threshold', 0.5)}"
         )

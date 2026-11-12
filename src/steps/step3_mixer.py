@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""步骤3：音频混音。
+"""步骤3：混音。
 
 在 QThread 中执行完整的混音流程（提取音轨→加载配音→混音→导出）。
 
@@ -31,9 +31,11 @@ from .audio_utils import (
     angles_from_config,
 )
 from .audio_utils.ffmpeg_utils import probe_audio
+from .audio_utils.decode import load_audio_segment
 from .stream_mixer import mix_streaming_task
 from .audio_metadata import mix_metadata_options, remember_mix_metadata
 from .output_paths import planned_mix_output
+from . import perf
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"}
@@ -81,6 +83,23 @@ def _cleanup(*paths):
 def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                     log_callback=None, progress_callback=None,
                     stop_check=None):
+    """对单个任务执行完整混音流程（入口包装：性能埋点；实现在 _mix_single_task_impl）。"""
+    timer = perf.task_timer(f"step3-{os.path.basename(task.source_path)}")
+    try:
+        return _mix_single_task_impl(
+            task, config, log_callback=log_callback,
+            progress_callback=progress_callback, stop_check=stop_check,
+        )
+    finally:
+        # 无论成功/失败/跳过都输出一行 PERF，批量时才能按任务对账；
+        # 报告后摘掉 thread-local，避免残留到长寿命线程
+        timer.report()
+        perf.attach(None)
+
+
+def _mix_single_task_impl(task: TaskInfo, config: WorkflowConfig,
+                          log_callback=None, progress_callback=None,
+                          stop_check=None):
     """对单个任务执行完整混音流程。
 
     Args:
@@ -119,13 +138,13 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
     is_video = os.path.splitext(original_path)[1].lower() in VIDEO_EXTENSIONS
     output_format = cfg.get("output_format", "mp4" if is_video else "mp3")
 
-    _log(f"[音频混音] 启动: {os.path.basename(original_path)}")
-    _log(f"[音频混音] 配音目录: {mix_folder}")
-    _log(f"[音频混音] 导出目录: {output_folder}")
+    _log(f"[混音] 启动: {os.path.basename(original_path)}")
+    _log(f"[混音] 配音目录: {mix_folder}")
+    _log(f"[混音] 导出目录: {output_folder}")
 
     # 跳过已存在
     if cfg.get("skip_existing", True) and not task.force_remix and os.path.exists(final_output):
-        _log(f"[音频混音] 已存在，跳过: {final_output}")
+        _log(f"[混音] 已存在，跳过: {final_output}")
         _progress(100)
         return True, final_output
 
@@ -145,7 +164,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
     export_output = None
     try:
         if is_video:
-            _log("[音频混音] 提取视频音轨...")
+            _log("[混音] 提取视频音轨...")
             _progress(5)
             temp_audio_path = extract_audio_from_video(
                 original_path, stop_check=stop_check
@@ -154,14 +173,14 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
                 _cleanup(temp_audio_path)
                 return False, "用户中止"
             try:
-                with open(temp_audio_path, "rb") as audio_file:
-                    original_audio = AudioSegment.from_file(audio_file)
+                with perf.span("片段解码"):
+                    original_audio = load_audio_segment(temp_audio_path)
             except Exception:
                 _cleanup(temp_audio_path)
                 raise
         else:
-            with open(original_path, "rb") as audio_file:
-                original_audio = AudioSegment.from_file(audio_file)
+            with perf.span("片段解码"):
+                original_audio = load_audio_segment(original_path)
 
         _progress(15)
 
@@ -171,20 +190,21 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
             _cleanup(temp_audio_path)
             return False, f"配音目录无有效文件: {mix_folder}"
 
-        _log(f"[音频混音] 发现 {len(audio_files)} 个配音片段")
+        _log(f"[混音] 发现 {len(audio_files)} 个配音片段")
 
         # 3. 声道检测（使用配置的线程数）
         per_file_angles = {}
         if cfg.get("channel_detect", True):
-            _log("[音频混音] 检测声道位置...")
+            _log("[混音] 检测声道位置...")
             _progress(20)
             # 声道→角度映射由 panning 统一算出（分离度 + 居中偏置），
             # 面板保存与这里必须走同一个函数，否则"看到的"和"混音的"不是一套。
             channel_map = angles_from_config(cfg)
-            per_file_angles = detect_angles_parallel(
-                original_audio, audio_files, channel_map,
-                max_workers=cfg.get("thread_count", 4)
-            )
+            with perf.span("声道检测"):
+                per_file_angles = detect_angles_parallel(
+                    original_audio, audio_files, channel_map,
+                    max_workers=cfg.get("thread_count", 4)
+                )
             # 左/右指配音摆放的声相（θ<45°→偏左，θ>135°→偏右），并非原人声所在声道。
             # 增益 left=cos(θ/2)、right=sin(θ/2)。channel_map 默认把原音在左→配音放右(155°)、
             # 原音在右→配音放左(25°)，故统计的“偏左”通常对应原音偏右。
@@ -192,7 +212,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
             pan_right = sum(1 for a in per_file_angles.values() if a > 135)
             pan_center = len(per_file_angles) - pan_left - pan_right
             _log(
-                f"[音频混音] 配音声相: 偏左{pan_left} 居中{pan_center} 偏右{pan_right}"
+                f"[混音] 配音声相: 偏左{pan_left} 居中{pan_center} 偏右{pan_right}"
                 f" (共{len(per_file_angles)}，原音一般放对侧)"
             )
             _progress(30)
@@ -201,7 +221,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
             per_file_angles = {af["filename"]: 180 for af in audio_files}
 
         # 4. 加载配音片段，组装 mix_items
-        _log("[音频混音] 加载配音片段...")
+        _log("[混音] 加载配音片段...")
         mix_items = []
         total = len(audio_files)
         for i, audio_info in enumerate(audio_files):
@@ -211,12 +231,12 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
 
             audio_path = os.path.join(mix_folder, audio_info["filename"])
             try:
-                with open(audio_path, "rb") as audio_file:
-                    mix_segment = AudioSegment.from_file(audio_file)
+                with perf.span("片段解码"):
+                    mix_segment = load_audio_segment(audio_path)
                 angle = per_file_angles.get(audio_info["filename"], 180)
                 mix_items.append((mix_segment, audio_info["timestamp_ms"], angle))
             except Exception as e:
-                _log(f"[音频混音] 加载失败 {audio_info['filename']}: {e}")
+                _log(f"[混音] 加载失败 {audio_info['filename']}: {e}")
 
             if total > 0:
                 _progress(min(30 + int((i + 1) / total * 40), 70))
@@ -226,7 +246,7 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
             _cleanup(temp_audio_path)
             return False, "无可用配音片段"
 
-        _log("[音频混音] 合成中...")
+        _log("[混音] 合成中...")
         _progress(75)
         # 高位深 WAV 在混音前扩展精度，避免先量化到 16bit 再补零导出。
         if output_format == "wav" and int(cfg.get("wav_bit_depth", 16)) > 16:
@@ -234,25 +254,27 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         align_onset = cfg.get("align_onset", False)
         content_alignment = cfg.get("content_alignment", False)
         _log(
-            f"[音频混音] 参数: 音量={cfg.get('volume_db', 0.0)}dB, "
+            f"[混音] 参数: 音量={cfg.get('volume_db', 0.0)}dB, "
             f"模式={cfg.get('auto_volume', 'off')}, 起始对齐={align_onset}, "
             f"内容对齐={content_alignment}, 峰值保护={cfg.get('peak_mode', 'peak')}, "
             f"高质量重采样={cfg.get('high_quality_resample', True)}"
         )
-        original_audio = mix_with_numpy(
-            original_audio, mix_items,
-            volume_db=cfg.get("volume_db", 0.0),
-            auto_volume=cfg.get("auto_volume", "off"),
-            align_onset=align_onset,
-            content_alignment=content_alignment,
-            peak_mode=cfg.get("peak_mode", "peak"),
-            high_quality=cfg.get("high_quality_resample", True),
-            stop_check=stop_check,
-        )
+        with perf.span("混音累加"):
+            original_audio = mix_with_numpy(
+                original_audio, mix_items,
+                volume_db=cfg.get("volume_db", 0.0),
+                auto_volume=cfg.get("auto_volume", "off"),
+                align_onset=align_onset,
+                content_alignment=content_alignment,
+                peak_mode=cfg.get("peak_mode", "peak"),
+                high_quality=cfg.get("high_quality_resample", True),
+                stop_check=stop_check,
+                max_workers=cfg.get("thread_count", 4),
+            )
         _progress(85)
 
         # 6. 导出
-        _log("[音频混音] 导出中...")
+        _log("[混音] 导出中...")
         # 导出音频质量参数
         bitrate = cfg.get("audio_bitrate", "192k")
         sample_rate = int(cfg.get("audio_sample_rate", 44100))
@@ -263,29 +285,30 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         with tempfile.NamedTemporaryFile(dir=output_folder, prefix=".mix-",
                                          suffix="." + output_format, delete=False) as tmp:
             export_output = tmp.name
-        if is_video and output_format == "mp4":
-            replace_audio_in_video(
-                original_path, original_audio, export_output,
-                bitrate=bitrate, sample_rate=sample_rate, channels=channels,
-                stop_check=stop_check, high_quality=high_quality,
-                metadata_options=metadata_options,
-            )
-        elif output_format == "wav":
-            original_audio = resample_audio(original_audio, sample_rate, stop_check, high_quality)
-            original_audio = original_audio.set_channels(channels)
-            if wav_bit_depth == 24:
-                _export_wav_24bit(original_audio, export_output, stop_check=stop_check)
+        with perf.span("导出"):
+            if is_video and output_format == "mp4":
+                replace_audio_in_video(
+                    original_path, original_audio, export_output,
+                    bitrate=bitrate, sample_rate=sample_rate, channels=channels,
+                    stop_check=stop_check, high_quality=high_quality,
+                    metadata_options=metadata_options,
+                )
+            elif output_format == "wav":
+                original_audio = resample_audio(original_audio, sample_rate, stop_check, high_quality)
+                original_audio = original_audio.set_channels(channels)
+                if wav_bit_depth == 24:
+                    _export_wav_24bit(original_audio, export_output, stop_check=stop_check)
+                else:
+                    width = max(1, min(4, wav_bit_depth // 8))
+                    with open(export_output, "wb") as wav_file:
+                        original_audio.set_sample_width(width).export(wav_file, format="wav")
             else:
-                width = max(1, min(4, wav_bit_depth // 8))
-                with open(export_output, "wb") as wav_file:
-                    original_audio.set_sample_width(width).export(wav_file, format="wav")
-        else:
-            export_audio_ffmpeg(
-                original_audio, export_output, output_format,
-                bitrate=bitrate, sample_rate=sample_rate, channels=channels,
-                stop_check=stop_check, high_quality=high_quality,
-                metadata_options=metadata_options,
-            )
+                export_audio_ffmpeg(
+                    original_audio, export_output, output_format,
+                    bitrate=bitrate, sample_rate=sample_rate, channels=channels,
+                    stop_check=stop_check, high_quality=high_quality,
+                    metadata_options=metadata_options,
+                )
         _cleanup(temp_audio_path)
         if _stopped():
             _cleanup(export_output)
@@ -296,21 +319,21 @@ def mix_single_task(task: TaskInfo, config: WorkflowConfig,
         try:
             remember_mix_metadata(task, tags)
         except OSError as exc:
-            _log(f"[音频混音] 警告：任务记录写入失败: {exc}")
+            _log(f"[混音] 警告：任务记录写入失败: {exc}")
 
         _progress(100)
-        _log(f"[音频混音] 完成: {final_output}")
+        _log(f"[混音] 完成: {final_output}")
         return True, final_output
     except Exception as e:
         _cleanup(temp_audio_path, export_output)
-        _log(f"[音频混音] 异常: {e}")
+        _log(f"[混音] 异常: {e}")
         return False, str(e)
 
 
 # ---------- 单任务 Worker ----------
 
 class MixerWorker(QThread):
-    """音频混音工作线程（单任务）。"""
+    """混音工作线程（单任务）。"""
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)         # 0-100
     status_signal = pyqtSignal(str)
@@ -345,7 +368,7 @@ class MixerWorker(QThread):
 # ---------- 批量并行 Worker ----------
 
 class MixerBatchWorker(QThread):
-    """音频混音批量并行工作线程。
+    """混音批量并行工作线程。
 
     用 ThreadPoolExecutor 同时处理多个混音任务。
     每个任务在独立线程中调用 mix_single_task。
@@ -381,7 +404,7 @@ class MixerBatchWorker(QThread):
         max_workers = min(max_workers, len(self.tasks))  # 不会超过任务数
 
         self.log_signal.emit(
-            f"[音频混音批量] 启动: {len(self.tasks)} 个任务, "
+            f"[混音批量] 启动: {len(self.tasks)} 个任务, "
             f"并行线程数={max_workers}"
         )
 
@@ -461,12 +484,12 @@ class MixerBatchWorker(QThread):
                     if ok:
                         success_count += 1
                         self.log_signal.emit(
-                            f"[音频混音批量] [{task.source_name}] 完成: {msg}"
+                            f"[混音批量] [{task.source_name}] 完成: {msg}"
                         )
                     else:
                         fail_count += 1
                         self.log_signal.emit(
-                            f"[音频混音批量] [{task.source_name}] 失败: {msg}"
+                            f"[混音批量] [{task.source_name}] 失败: {msg}"
                         )
 
                     # 任务结束即占满份额，平均进度随之推进
@@ -480,12 +503,12 @@ class MixerBatchWorker(QThread):
             self._executor = None
 
         if self._stop_flag:
-            self.log_signal.emit("[音频混音批量] 已中止")
+            self.log_signal.emit("[混音批量] 已中止")
 
         if not self._stop_flag:
             self.progress_signal.emit(100)
         self.log_signal.emit(
-            f"[音频混音批量] 完成: 成功 {success_count}, 失败 {fail_count}"
+            f"[混音批量] 完成: 成功 {success_count}, 失败 {fail_count}"
         )
         clear_mix_cache()
         self.finished_signal.emit(success_count, fail_count)

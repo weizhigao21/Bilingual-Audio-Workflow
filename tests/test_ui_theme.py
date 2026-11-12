@@ -245,7 +245,8 @@ class ShellLayoutTests(unittest.TestCase):
         panel.set_output(long_path, "字幕")
         text = panel.output_label.text()
         self.assertIn("…", text)
-        self.assertRegex(text, r"subtitle\.lrc</a>$")
+        self.assertRegex(text, r"subtitle\.lrc</a>")
+        self.assertTrue(text.endswith("</a>"), "文件夹链接应缀在输出行末尾")
         self.assertIn(long_path, panel.output_label.toolTip())
         panel.set_output("")
         # 输出行不再隐藏：显隐会让卡片高矮差一个行高，切换任务时中央区
@@ -336,7 +337,7 @@ class ToolbarEntryTests(unittest.TestCase):
         self.assertNotIn(AddMediaDialog.FOLDER, (0, 1))
 
     def test_add_buttons_live_in_matching_step_cards(self):
-        """添加字幕 → 字幕提取卡；添加配音 → 语音生成卡。"""
+        """添加字幕 → 字幕提取卡；添加配音 → 配音卡。"""
         from PyQt6.QtWidgets import QPushButton
         step1_texts = [b.text() for b in
                        self.window.step_panels[1].findChildren(QPushButton)]
@@ -379,7 +380,7 @@ class ToolbarEntryTests(unittest.TestCase):
 
     def test_step_cards_have_config_entries(self):
         """设置入口与旧版一致：步骤卡内「字幕/TTS/混音 配置…」按钮。"""
-        expected = {1: "字幕配置…", 2: "TTS 配置…", 3: "混音配置…"}
+        expected = {1: "字幕配置…", 2: "配音配置…", 3: "混音配置…"}
         for step, text in expected.items():
             panel = self.window.step_panels[step]
             texts = [b.text() for b in panel.findChildren(QPushButton)]
@@ -411,7 +412,10 @@ class StepPanelOutputTests(unittest.TestCase):
         self.assertEqual(label.textFormat(), Qt.TextFormat.RichText)
         self.assertIn('<a href="file:///C:/work/tasks/subtitle.lrc">',
                       label.text())
-        self.assertTrue(label.openExternalLinks())
+        # P2-4 起链接自行分发（openExternalLinks 关闭）：打开文件与
+        # 「打开文件夹」定位都走 linkActivated，否则拦不到 explorer /select
+        self.assertFalse(label.openExternalLinks())
+        self.assertIn('href="folder:', label.text())
 
     def test_special_characters_are_escaped(self):
         path = "C:/a&b/<c>/d>e/sub&title.lrc"
@@ -621,7 +625,7 @@ class SettingsDialogTabTests(unittest.TestCase):
         dialog = self._dialog(0)
         self.assertEqual(
             [dialog.tab_bar.tabText(i) for i in range(dialog.tab_bar.count())],
-            ["常规", "字幕提取", "语音生成", "音频混音"])
+            ["常规", "字幕提取", "配音", "混音"])
         self.assertFalse(dialog.tab_bar.drawBase())
         self.assertEqual(dialog.tab_bar.currentIndex(), 0)
         self.assertEqual(dialog.pages.currentIndex(), 0)
@@ -789,7 +793,7 @@ class StepCardStateStripeTests(unittest.TestCase):
         host.resize(520, 320)
         layout = QVBoxLayout(host)
         layout.setContentsMargins(20, 20, 20, 20)
-        panel = StepPanel(2, "语音生成")
+        panel = StepPanel(2, "配音")
         self.addCleanup(panel.deleteLater)
         layout.addWidget(panel)
         layout.addStretch(1)

@@ -2,13 +2,16 @@
 """混音核心：pydub 叠加回退与 numpy 向量化混音。"""
 import math
 import os
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from pydub import AudioSegment
 
 from .common import HAS_NUMPY, np, logger
+from .decode import load_audio_segment
 from .detection import find_nearest_onset, detect_voice_onset
 from .rms import compute_rms_db, compute_rms_envelope, interpolate_envelope
 from .ffmpeg_utils import resample_audio
+from .. import perf
 
 
 def _check_stop(stop_check):
@@ -61,10 +64,103 @@ def _finish_mix(samples, sample_width, mode, stop_check=None, output_path=None):
     return result
 
 
+class _SkipItem(Exception):
+    """解码失败/空片段：按旧语义只跳过该片段，不让整段混音失败。"""
+
+
+def _prepare_mix_item(mix_seg, frame_rate, high_quality, stop_check,
+                      align_onset, tag):
+    """单个片段的纯函数准备：解码 → 单声道 → 重采样 →（可选）起始检测。
+
+    供线程池并发执行；逐片段独立调用、参数与旧串行路径完全一致，
+    因此结果逐位相同。解码失败/空片段抛 _SkipItem（消费方跳过并记日志）；
+    其余异常向上传播（保持旧语义：重采样/起始检测失败 = 整段混音失败）。
+    """
+    if isinstance(mix_seg, (str, os.PathLike)):
+        try:
+            with perf.span("片段解码"):
+                mix_seg = load_audio_segment(mix_seg)
+        except Exception as exc:
+            raise _SkipItem(f"片段读取失败，已跳过: {tag} - {exc}")
+        if len(mix_seg) == 0:
+            raise _SkipItem(f"片段为空，已跳过: {tag}")
+    original_seg = mix_seg
+    if original_seg.channels == 1:
+        mix_mono = original_seg
+    else:
+        mix_mono = original_seg.set_channels(1)
+
+    if original_seg.frame_rate != frame_rate:
+        mix_mono = resample_audio(mix_mono, frame_rate, stop_check, high_quality)
+
+    # 起始检测基于解码后的原片段（与旧路径一致，非单声道/重采样结果）
+    onset_ms = detect_voice_onset(original_seg) if align_onset else 0
+    return mix_mono, onset_ms
+
+
+def _prepare_mix_items(mix_items, frame_rate, high_quality, stop_check,
+                       align_onset, max_workers):
+    """并发准备全部片段，**严格按原顺序**产出 (i, prepared)。
+
+    prepared 是 (mix_mono, onset_ms) 或 _SkipItem 实例（由消费方按旧语义
+    跳过）。有界前瞻窗口（2×线程数）限制同时驻留内存的已备片段数，
+    长音频走磁盘缓冲时不会把全部片段囤在内存。消费方遍历顺序、
+    进度回调与叠加顺序与旧串行路径完全一致。
+    """
+    total = len(mix_items)
+    workers = max(1, int(max_workers or 1))
+    window = workers * 2
+    wrapped = perf.wrap(_prepare_mix_item)
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mix-prep")
+    fut_map = {}
+    results = {}
+    next_yield = 0
+    submit_from = 0
+
+    def _submit(idx):
+        mix_seg = mix_items[idx][0]
+        tag = mix_seg if isinstance(mix_seg, (str, os.PathLike)) else f"片段#{idx}"
+        fut = pool.submit(wrapped, mix_seg, frame_rate, high_quality,
+                          stop_check, align_onset, tag)
+        fut_map[fut] = idx
+
+    try:
+        while submit_from < min(total, window):
+            _submit(submit_from)
+            submit_from += 1
+        while next_yield < total:
+            _check_stop(stop_check)
+            if not fut_map:
+                raise RuntimeError("混音准备管线停滞（不应发生）")
+            done, _ = wait(fut_map, return_when=FIRST_COMPLETED, timeout=0.1)
+            for fut in done:
+                idx = fut_map.pop(fut)
+                try:
+                    results[idx] = fut.result()
+                except _SkipItem as exc:
+                    results[idx] = exc
+                if submit_from < total:
+                    _submit(submit_from)
+                    submit_from += 1
+            while next_yield in results:
+                yield next_yield, results.pop(next_yield)
+                next_yield += 1
+    finally:
+        for fut in list(fut_map):
+            fut.cancel()
+            if fut.done() and not fut.cancelled():
+                try:
+                    fut.result()
+                except Exception:
+                    pass  # 迟到异常只吞掉告警，语义已由首异常表达
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
                    align_onset=False, content_alignment=False,
                    peak_mode="peak", high_quality=True, stop_check=None,
-                   output_path=None, accumulator_path=None, item_callback=None):
+                   output_path=None, accumulator_path=None, item_callback=None,
+                   max_workers=4):
     if np is None or not HAS_NUMPY:
         raise RuntimeError("高质量混音需要 numpy，请安装项目依赖")
 
@@ -153,32 +249,20 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
                 original_rms_db = compute_rms_db(original)
                 logger.debug(f"[混音] auto_volume=auto fallback to fixed, RMS={original_rms_db:.1f}dBFS")
 
-        for i, (mix_seg, pos_ms, angle) in enumerate(mix_items):
+        # 片段准备（解码+单声道+重采样）并发执行、消费严格按原序：
+        # 输出与旧串行路径逐位一致，进度回调与跳过语义不变。
+        prepared_items = _prepare_mix_items(
+            mix_items, frame_rate, high_quality, stop_check,
+            align_onset, max_workers)
+        for i, prepared in prepared_items:
             _check_stop(stop_check)
-            if isinstance(mix_seg, (str, os.PathLike)):
-                # 长音频走磁盘缓冲时传入的是片段路径，在此处按需解码。
-                # 与短音频路径（step3_mixer 预加载片段）行为对齐：单个片段
-                # 损坏、缺失或为空只跳过该片段，不让整段混音整体失败。
-                try:
-                    with open(mix_seg, "rb") as clip_file:
-                        mix_seg = AudioSegment.from_file(clip_file)
-                except Exception as exc:
-                    logger.warning(f"[混音] 片段读取失败，已跳过: {mix_seg} - {exc}")
-                    if item_callback is not None:
-                        item_callback(i + 1, len(mix_items))
-                    continue
-                if len(mix_seg) == 0:
-                    logger.warning(f"[混音] 片段为空，已跳过: {mix_seg}")
-                    if item_callback is not None:
-                        item_callback(i + 1, len(mix_items))
-                    continue
-            if mix_seg.channels == 1:
-                mix_mono = mix_seg
-            else:
-                mix_mono = mix_seg.set_channels(1)
-
-            if mix_seg.frame_rate != frame_rate:
-                mix_mono = resample_audio(mix_mono, frame_rate, stop_check, high_quality)
+            mix_seg, pos_ms, angle = mix_items[i]
+            if isinstance(prepared, _SkipItem):
+                logger.warning(f"[混音] {prepared}")
+                if item_callback is not None:
+                    item_callback(i + 1, len(mix_items))
+                continue
+            mix_mono, onset_ms = prepared
 
             actual_pos_ms = pos_ms
 
@@ -198,7 +282,7 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
 
             onset_trim_frames = 0
             if align_onset:
-                onset_ms = detect_voice_onset(mix_seg)
+                # onset_ms 由准备阶段并发算好（对解码原片段检测，与旧路径一致）
                 if onset_ms > 0:
                     adjusted = actual_pos_ms - onset_ms
                     if adjusted >= 0:

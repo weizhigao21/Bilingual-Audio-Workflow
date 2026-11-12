@@ -80,5 +80,5 @@ def run_incremental(worker, api, tasks, completed, completed_weight, started, ta
     worker.log_signal.emit(f'任务ID: {task_id}')
     worker.log_signal.emit(f'任务文件保存位置: {task_dir}')
     if failures or abandoned:
-        worker.log_signal.emit(f'语音生成失败或未处理 {failures+abandoned}/{total} 个片段')
+        worker.log_signal.emit(f'配音失败或未处理 {failures+abandoned}/{total} 个片段')
     worker._finish_generation(not (failures or abandoned or worker.stop_flag or worker._read_failures), task_dir)

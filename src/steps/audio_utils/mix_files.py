@@ -5,10 +5,14 @@ import re
 
 _mix_files_cache = {}
 
+# 片段名 = 序号_时-分-秒.厘秒_文本.扩展名。扩展名接受 .wav/.mp3 两种：
+# 存量是 .wav 命名（实为 MP3），P1-2 收口后 Edge 新产物按真实格式命名 .mp3。
+# 文本段不含点号（generate_filename 已过滤），后缀锚定不会误切文本。
+_CLIP_RE = re.compile(r"^(\d{4})_(\d{2})-(\d{2})-(\d{2})\.(\d{2})_(.+)\.(wav|mp3)$")
+
 
 def parse_filename(filename):
-    pattern = r"^(\d{4})_(\d{2})-(\d{2})-(\d{2})\.(\d{2})_(.+)\.wav$"
-    match = re.match(pattern, filename)
+    match = _CLIP_RE.match(filename)
     if not match:
         return None
 
@@ -37,7 +41,7 @@ def get_mix_audio_files(mix_folder):
 
     audio_files = []
     for f in os.listdir(mix_folder):
-        if not f.endswith(".wav"):
+        if not f.endswith((".wav", ".mp3")):
             continue
         parsed = parse_filename(f)
         if not parsed:
@@ -50,6 +54,21 @@ def get_mix_audio_files(mix_folder):
         except OSError:
             continue
         audio_files.append(parsed)
+
+    # 同序号新旧命名并存（存量 .wav + 新生成 .mp3）时只取一份，否则同一条
+    # 字幕会被混音两遍。取修改时间较新者；copy2 保留时间戳导致并列时
+    # 优先 .mp3（新命名代表最近一次生成）。
+    best = {}
+    for parsed in audio_files:
+        try:
+            mtime = os.path.getmtime(os.path.join(mix_folder, parsed["filename"]))
+        except OSError:
+            mtime = 0.0
+        rank = (mtime, parsed["filename"].endswith(".mp3"))
+        seq = parsed["sequence"]
+        if seq not in best or rank > best[seq][0]:
+            best[seq] = (rank, parsed)
+    audio_files = [item[1] for item in best.values()]
 
     audio_files.sort(key=lambda x: x["sequence"])
     _mix_files_cache[mix_folder] = audio_files

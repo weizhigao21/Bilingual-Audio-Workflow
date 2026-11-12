@@ -8,6 +8,8 @@ import json
 import wave
 import audioop
 
+from .. import perf
+
 
 def _pcm_input(audio):
     pcm_format = {1: "s8", 2: "s16le", 4: "s32le"}[audio.sample_width]
@@ -57,6 +59,7 @@ def export_audio_ffmpeg(audio_segment, output_path, format_type="mp3",
 
 def probe_audio(source_path):
     """返回 (采样率, 时长秒)，无音轨或探测失败时返回 None。"""
+    perf.COUNTERS.incr("ffprobe_procs")
     try:
         proc = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -178,6 +181,7 @@ def _run_ffmpeg(cmd, stop_check=None, input_data=None):
     """同步收发管道以免 stderr 写满死锁，轮询支持取消并回收子进程。"""
     if stop_check is not None and stop_check():
         raise RuntimeError("用户已停止处理")
+    perf.COUNTERS.incr("ffmpeg_procs")
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,

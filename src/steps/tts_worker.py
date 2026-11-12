@@ -13,9 +13,11 @@ from .local_voice_stream import supports_incremental, run_incremental
 from .tts_logger import logger
 from .tts_profile import profile_matches, save_profile, dir_name
 from .edge_voices import EDGE_TTS_VOICES
+from . import perf
 from .tts_utils import (
     set_sleep_mode,
     generate_filename,
+    find_existing_clip,
     tts_task,
     tts_bulk_task,
     edge_tts_task,
@@ -90,6 +92,7 @@ class TTSWorker(QThread):
 
     def run(self):
         self._read_failures = 0
+        timer = perf.task_timer(f"step2-{self.config.get('source_name', 'task')}")
         prevent_sleep = self.config.get("prevent_sleep", True)
         if prevent_sleep:
             set_sleep_mode(True)
@@ -291,8 +294,11 @@ class TTSWorker(QThread):
             )
             for task in all_tasks:
                 idx, timestamp, text, save_dir, file_mtime = task
-                file_path = generate_filename(idx, timestamp, text, save_dir)
-                if reuse_existing and os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
+                # 跨扩展名查存在性：存量 .wav（实为 MP3）与新命名 .mp3
+                # 命中任一即跳过，避免重跑时生成同片段的重复文件。
+                file_path = find_existing_clip(
+                    generate_filename(idx, timestamp, text, save_dir))
+                if reuse_existing and file_path:
                     completed += 1
                     completed_weight += len(text)
                     skipped_throttle.update(completed, completed_weight)
@@ -318,6 +324,10 @@ class TTSWorker(QThread):
             )
 
             self.log_signal.emit(f"剩余 {len(pending_tasks)} 个任务待处理")
+            # 首批结果落地前（本地模型常要十几秒到几十秒）状态行只能显示
+            # 「剩余 计算中...」，看起来像卡在一段很慢的计算里。这里先用字幕
+            # 字数给一个初估值，实测值一到立刻覆盖。
+            self._emit_initial_eta(pending_tasks)
 
             tts_mode = self.config.get("tts_mode", "api")
 
@@ -352,10 +362,46 @@ class TTSWorker(QThread):
             self.log_signal.emit(f"处理出错: {e}")
             self.finished_signal.emit(False)
         finally:
+            # 无论正常完成还是中途停止都落一行 PERF（计数增量按本任务算）
+            timer.report()
+            perf.attach(None)
             if prevent_sleep:
                 set_sleep_mode(False)
                 self.log_signal.emit("防休眠已关闭")
             self.audio_cache.close()
+
+    # 初估吞吐（每秒可合成的字幕字数，单路）。只在首批结果返回前使用：
+    # 本地 GPU 模型首批往往要几十秒，这段空窗期不该让用户盯着「计算中...」。
+    # 首批一落地就换成按实际耗时算出的剩余时间，所以经验值的误差只影响
+    # 开头那一小段。
+    #   edge：单次请求握手 + 合成约 2~3 秒、并发 8 路 → 合计约 40~50 字/秒，
+    #         折成单路就是下面这个偏保守的 6 字/秒。
+    #   api ：单路按「语音 4.5 字/秒 ÷ RTF 0.25」→ 约 18 字/秒。
+    _PRIOR_CHARS_PER_SECOND = {"edge": 6.0, "api": 18.0}
+
+    def _initial_eta_seconds(self, chars):
+        """按字幕字数与有效并发路数估算总耗时（秒）。"""
+        mode = "edge" if self.config.get("tts_mode", "api") == "edge" else "api"
+        if mode == "edge":
+            threads = max(1, int(self.config.get("edge_threads", 8) or 8))
+            gate = max(1, int(self.config.get("edge_max_concurrent", 8) or 8))
+            lanes = min(threads, gate)
+        else:
+            lanes = max(1, len(self._get_available_apis()))
+        rate = self._PRIOR_CHARS_PER_SECOND[mode] * lanes
+        return max(1.0, chars / rate) if rate > 0 else 0.0
+
+    def _emit_initial_eta(self, pending_tasks):
+        """生成开始前发一个「约 X」的初估剩余时间，替代默认的「计算中...」。"""
+        if not pending_tasks:
+            return
+        chars = sum(len(task[2]) for task in pending_tasks)
+        if chars <= 0:
+            return
+        try:
+            self.eta_signal.emit("约" + format_eta(self._initial_eta_seconds(chars)))
+        except Exception:
+            pass
 
     def _get_available_apis(self):
         """获取可用 API 配置列表。"""
@@ -386,7 +432,7 @@ class TTSWorker(QThread):
         voice = self.config.get("edge_voice", "zh-CN-XiaoxiaoNeural")
         if voice not in EDGE_TTS_VOICES:
             self.log_signal.emit(
-                f"免费 Edge TTS 不支持声音 {voice}，请在 TTS 配置中重新选择声音；未发送片段请求"
+                f"免费 Edge TTS 不支持声音 {voice}，请在配音配置中重新选择声音；未发送片段请求"
             )
             self._finish_generation(False, task_dir)
             return
@@ -449,7 +495,8 @@ class TTSWorker(QThread):
                 if self.stop_flag:
                     break
 
-                future = executor.submit(process_task, task)
+                # wrap 把 PerfTimer 带进共享池线程，TTS请求/缓存命中耗时才归队
+                future = executor.submit(perf.wrap(process_task), task)
                 futures[future] = task
 
             for future in concurrent.futures.as_completed(futures):
@@ -492,7 +539,7 @@ class TTSWorker(QThread):
             )
 
             if failures:
-                self.log_signal.emit(f"语音生成失败 {failures}/{total} 个片段")
+                self.log_signal.emit(f"配音失败 {failures}/{total} 个片段")
             self._finish_generation(failures == 0 and not self.stop_flag and self._read_failures == 0, task_dir)
         finally:
             # 无论正常完成还是中途停止：先取消尚未开始的任务，再给已开始的
@@ -660,7 +707,7 @@ class TTSWorker(QThread):
 
         threads = []
         for api_config in available_apis:
-            thread = threading.Thread(target=worker, args=(api_config,))
+            thread = threading.Thread(target=perf.wrap(worker), args=(api_config,))
             thread.daemon = True
             threads.append(thread)
             thread.start()
@@ -688,5 +735,5 @@ class TTSWorker(QThread):
         )
 
         if failures or abandoned:
-            self.log_signal.emit(f"语音生成失败或未处理 {failures + abandoned}/{total} 个片段")
+            self.log_signal.emit(f"配音失败或未处理 {failures + abandoned}/{total} 个片段")
         self._finish_generation(failures == 0 and abandoned == 0 and not self.stop_flag and self._read_failures == 0, task_dir)

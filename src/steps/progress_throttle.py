@@ -13,6 +13,8 @@
 import threading
 import time
 
+from . import perf
+
 MIN_ITEMS_TO_THROTTLE = 20
 PROGRESS_INTERVAL = 0.15   # 秒：进度 / 加权进度最小发送间隔
 ETA_INTERVAL = 0.5         # 秒：剩余时间最小发送间隔
@@ -34,10 +36,18 @@ class ProgressThrottle:
                  now=time.monotonic):
         self._total = max(0, int(total))
         self.enabled = self._total > MIN_ITEMS_TO_THROTTLE
-        self._emit_progress = emit_progress
-        self._emit_weight = emit_weight
-        self._emit_eta = emit_eta
-        self._emit_log = emit_log
+
+        def counted(fn):
+            # 每次真实发射计入 ui_signals（PERF 口径）；节流本身不改变发射语义。
+            def _inner(*args, **kwargs):
+                perf.COUNTERS.incr("ui_signals")
+                return fn(*args, **kwargs)
+            return _inner
+
+        self._emit_progress = counted(emit_progress)
+        self._emit_weight = counted(emit_weight)
+        self._emit_eta = counted(emit_eta)
+        self._emit_log = counted(emit_log)
         self._now = now
         self._lock = threading.Lock()
 

@@ -136,7 +136,7 @@ class PipelineMixin:
                     if self._stop_flag:
                         break
                     self.task_started.emit(task.task_id)
-                    self.log_signal.emit(f"[流水线] [{task.source_name}] 开始语音生成")
+                    self.log_signal.emit(f"[流水线] [{task.source_name}] 开始配音")
                     ok, msg = execute(task, 2)
                     self.task_finished.emit(task.task_id, ok)
                     if ok:

@@ -83,9 +83,13 @@ class TaskMixin:
                 completed = sum(t.step_status(step) in (STEP_DONE, STEP_SKIPPED)
                                 for t in group.tasks)
                 panel.progress.setValue(int(completed * 100 / max(1, total)))
-            panel.start_btn.setEnabled(self._batch_executor is None
-                                       and not any(self._workers.values()))
-            panel.stop_btn.setEnabled(False)
+            can_start = (self._batch_executor is None
+                         and not any(self._workers.values()))
+            self._set_button_enabled(
+                panel.start_btn, can_start,
+                "批量执行中，请等待完成" if self._batch_executor is not None
+                else "有步骤正在运行，请稍候")
+            self._set_button_enabled(panel.stop_btn, False, "没有正在运行的步骤")
         self._refresh_entry_buttons()
 
     @staticmethod
@@ -137,6 +141,20 @@ class TaskMixin:
             # 批量执行时也刷新状态，汇总视图保留信号驱动的累计进度。
             self._show_group_summary(self._current_group)
 
+    @staticmethod
+    def _set_button_enabled(button, enabled, reason=""):
+        """按钮禁用/启用并同步 tooltip（P2-4）。
+
+        禁用态必须说明原因（灰按钮不再装哑巴）；启用后还原按钮自带的
+        功能提示（如「为当前任务添加字幕文件」）。
+        """
+        default_tip = button.property("tipDefault")
+        if default_tip is None:
+            default_tip = button.toolTip()
+            button.setProperty("tipDefault", default_tip)
+        button.setEnabled(enabled)
+        button.setToolTip(default_tip if enabled else reason)
+
     def _refresh_step_panels(self, task: TaskInfo):
         """根据任务状态刷新三个步骤面板。"""
         for step in (1, 2, 3):
@@ -165,20 +183,39 @@ class TaskMixin:
                 panel.set_detail("")
                 panel.progress.setRange(0, 100)
                 panel.progress.setValue(100)
+            elif status == STEP_FAILED:
+                # 失败原因直达步骤卡：首行显示 + tooltip 全文（P0-2），
+                # 不再只藏在任务行 tooltip 与日志里
+                panel.set_error(getattr(task, f"step{step}_error", ""))
+                panel.progress.setRange(0, 100)
+                panel.progress.setValue(0)
             else:
                 panel.set_detail("")
                 panel.progress.setRange(0, 100)
                 panel.progress.setValue(0)
 
-            # 按钮可用性
+            # 按钮可用性（禁用原因直达 tooltip，P2-4）
             running = (status == STEP_RUNNING)
             skipped = (status == STEP_SKIPPED)
             ready = task.is_step_ready(step)
             # skipped 状态禁用开始按钮（已跳过，无需运行）
             # 但允许通过"重跑"来取消跳过
             busy = self._batch_executor is not None or any(self._workers.values())
-            panel.start_btn.setEnabled(not busy and not running and ready and not skipped)
-            panel.stop_btn.setEnabled(running and self._batch_executor is None)
+            can_start = not busy and not running and ready and not skipped
+            if can_start:
+                start_reason = ""
+            elif running:
+                start_reason = "该步骤正在运行"
+            elif skipped:
+                start_reason = "已跳过；如需重跑请在左侧任务右键菜单选择重跑"
+            elif not ready:
+                start_reason = f"请先完成步骤 {step - 1}"
+            else:
+                start_reason = "有任务正在执行，请稍候"
+            self._set_button_enabled(panel.start_btn, can_start, start_reason)
+            can_stop = running and self._batch_executor is None
+            self._set_button_enabled(panel.stop_btn, can_stop,
+                                     "" if can_stop else "没有正在运行的步骤")
         # 条目级按钮（添加字幕/配音）随步骤运行状态联动
         self._refresh_entry_buttons()
 
@@ -197,8 +234,17 @@ class TaskMixin:
         enabled = bool(task is not None
                        and self._batch_executor is None
                        and all(task.step_status(s) != STEP_RUNNING for s in (1, 2, 3)))
+        if enabled:
+            reason = ""
+        elif task is None:
+            reason = ("请选中具体任务，而非文件夹组" if self._current_group is not None
+                      else "请先在左侧选择任务")
+        elif self._batch_executor is not None:
+            reason = "批量执行中，请等待完成"
+        else:
+            reason = "有步骤正在运行，请稍候"
         for button in buttons:
-            button.setEnabled(enabled)
+            self._set_button_enabled(button, enabled, reason)
 
 
     # ========== 任务管理 ==========

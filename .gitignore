@@ -16,3 +16,6 @@ _preview/
 .workbuddy/
 # 本地字幕/翻译产物，属于工作素材，不入库
 subtitles/
+
+# TTS 运行期备份目录
+.tts-backup-*/

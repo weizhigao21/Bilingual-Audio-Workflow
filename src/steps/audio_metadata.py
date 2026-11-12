@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 
 from ..version import APP_VERSION
+from . import perf
 from .audio_utils.ffmpeg_utils import _run_ffmpeg
 
 
@@ -110,6 +111,7 @@ def _marker_for_edit(output_path, task=None):
 def _probe_embedded_tags(output_path):
     if not supports_embedded_tags(output_path):
         return {}
+    perf.COUNTERS.incr("ffprobe_procs")
     try:
         proc = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format_tags",

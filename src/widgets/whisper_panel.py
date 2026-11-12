@@ -39,7 +39,7 @@ class WhisperConfigPanel(QWidget):
         self.compute_combo = QComboBox()
         self.compute_combo.addItem("自动", "auto")
         self.compute_combo.addItem("int8（最快/省显存）", "int8")
-        self.compute_combo.addItem("int8_float16", "int8_float16")
+        self.compute_combo.addItem("int8_float16（混合精度）", "int8_float16")
         self.compute_combo.addItem("float16（平衡）", "float16")
         self.compute_combo.addItem("float32（最精确）", "float32")
         self.compute_combo.currentIndexChanged.connect(self._save)
@@ -52,7 +52,7 @@ class WhisperConfigPanel(QWidget):
         self.subfmt_combo.addItem("SRT", "srt")
         self.subfmt_combo.addItem("LRC + SRT", "lrc,srt")
         self.subfmt_combo.currentIndexChanged.connect(self._save)
-        basic.add_row("字幕格式", "语音生成读取 LRC；SRT/VTT 供其他用途",
+        basic.add_row("字幕格式", "配音读取 LRC；SRT/VTT 供其他用途",
                       self.subfmt_combo)
         layout.addWidget(basic)
 

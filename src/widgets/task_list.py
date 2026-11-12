@@ -542,12 +542,18 @@ class TaskListWidget(QTreeWidget):
 
     @staticmethod
     def _error_hint(task: TaskInfo) -> str:
-        """失败原因（首行、截断）附在 tooltip 中，便于快速定位。"""
+        """失败原因附在 tooltip 中：首行 + 次行（各最多 200 字）。
+
+        旧实现硬截首行 120 字，关键错误（如 ffmpeg stderr 摘要）经常被
+        拦腰截断；完整原文在步骤卡 tooltip 与运行日志里可查。
+        """
         for step in (1, 2, 3):
             if task.step_status(step) == STEP_FAILED:
                 error = getattr(task, f"step{step}_error", "")
                 if error:
-                    return "\n" + error.splitlines()[0][:120]
+                    lines = [ln for ln in error.splitlines() if ln.strip()]
+                    shown = [ln[:200] for ln in lines[:2]]
+                    return "\n" + "\n".join(shown)
         return ""
 
     def _update_group_text(self, item: QTreeWidgetItem, group: TaskGroup):
@@ -617,7 +623,7 @@ class TaskListWidget(QTreeWidget):
             )
             menu.addAction(act_remove)
             menu.addSeparator()
-            for step, label in ((1, "步骤1(字幕)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
+            for step, label in ((1, "步骤1(字幕提取)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
                 act = QAction(f"重跑组内全部 {label}", self)
                 act.triggered.connect(
                     lambda checked=False, s=step, gid=item_id:
@@ -633,7 +639,7 @@ class TaskListWidget(QTreeWidget):
             )
             menu.addAction(act_remove)
             menu.addSeparator()
-            for step, label in ((1, "步骤1(字幕)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
+            for step, label in ((1, "步骤1(字幕提取)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
                 act = QAction(f"重跑此目录全部 {label}", self)
                 act.triggered.connect(
                     lambda checked=False, s=step, gid=item_id, rel=relative_folder:
@@ -657,7 +663,7 @@ class TaskListWidget(QTreeWidget):
             )
             menu.addAction(act_remove)
             menu.addSeparator()
-            for step, label in ((1, "步骤1(字幕)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
+            for step, label in ((1, "步骤1(字幕提取)"), (2, "步骤2(配音)"), (3, "步骤3(混音)")):
                 act = QAction(f"重跑 {label}", self)
                 act.triggered.connect(
                     lambda checked=False, s=step, tid=task_id:

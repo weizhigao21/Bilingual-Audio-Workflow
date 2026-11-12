@@ -26,6 +26,11 @@ a = Analysis(
         'numpy.lib.format',
         'pydub',
         'pydub.utils',
+        # P1-1 进程内解码（libsndfile DLL 由 hook-soundfile 收集；
+        # 收集失败时 decode.py 自动回退 pydub，不影响可用性）
+        'soundfile',
+        'soundfile._soundfile_data',
+        'cffi',
         'requests',
         'sqlite3',
         'asyncio',

@@ -16,9 +16,10 @@
 各功能方法按职责拆分到 mixin 模块（工具栏/配置/批量/任务/步骤/重命名）。
 """
 import os
+import threading
 import time
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import WorkflowConfig
+from ..env_check import collect_warnings
 from ..ui_theme import LOG_COLORS, SIDEBAR_PADDING, SIDEBAR_WIDTH, WheelScrollGuard
 from ..version import APP_VERSION
 from ..task_manager import TaskQueue, TaskGroup
@@ -44,6 +46,9 @@ class WorkflowMainWindow(
     QMainWindow
 ):
     """工作流主窗口（声笺风格工作台）。"""
+
+    # 环境自检结果从后台线程回主线程的通道（P1-4）
+    _env_check_done = pyqtSignal(str)
 
     def __init__(self, config: WorkflowConfig):
         super().__init__()
@@ -71,6 +76,21 @@ class WorkflowMainWindow(
         restored, ignored = self.task_queue.restore_tasks()
         if restored or ignored:
             self._append_log(f"[任务恢复] 恢复 {restored} 个任务，忽略 {ignored} 条无效记录")
+
+        # 启动环境自检：后台轻量检查（P1-4），异常才提示，全部正常保持沉默。
+        # 结果经 Qt 信号回主线程再碰 UI；自检绝不阻断启动。
+        self._env_check_done.connect(self._append_log)
+        threading.Thread(target=self._run_env_check, daemon=True).start()
+
+    def _run_env_check(self):
+        """后台线程：收集环境警告并一次性提示。"""
+        try:
+            warnings = collect_warnings(self.config)
+        except Exception:
+            return  # 自检自身出错不影响启动
+        if warnings:
+            self._env_check_done.emit(
+                "[环境自检] 警告：" + "\n  · ".join(warnings))
 
     # ========== 界面骨架 ==========
     def _build_ui(self):
@@ -195,7 +215,7 @@ class WorkflowMainWindow(
 
         # 三个步骤面板（白色卡片）
         self.step_panels = {}
-        step_titles = {1: "字幕提取", 2: "语音生成", 3: "音频混音"}
+        step_titles = {1: "字幕提取", 2: "配音", 3: "混音"}
         for step in (1, 2, 3):
             panel = StepPanel(step, step_titles[step])
             panel.start_requested.connect(self._on_start_step)
@@ -211,15 +231,15 @@ class WorkflowMainWindow(
 
         self.add_mix_btn = self.step_panels[2].add_extra_button(
             "＋ 添加配音", kind=None)
-        self.add_mix_btn.setToolTip("为当前任务添加配音目录（跳过语音生成）")
+        self.add_mix_btn.setToolTip("为当前任务添加配音目录（跳过配音）")
         self.add_mix_btn.clicked.connect(self._on_add_mix_folder)
 
         # 各步骤卡的配置入口
         whisper_config_btn = self.step_panels[1].add_extra_button("字幕配置…")
         whisper_config_btn.setToolTip("设置设备、VAD、字幕格式、段落合并等参数")
         whisper_config_btn.clicked.connect(self._on_open_whisper_config)
-        tts_config_btn = self.step_panels[2].add_extra_button("TTS 配置…")
-        tts_config_btn.setToolTip("设置语音合成模式（Edge/API）、声音、语速等参数")
+        tts_config_btn = self.step_panels[2].add_extra_button("配音配置…")
+        tts_config_btn.setToolTip("设置配音模式（Edge/API）、声音、语速等参数")
         tts_config_btn.clicked.connect(self._on_open_tts_config)
         mixer_config_btn = self.step_panels[3].add_extra_button("混音配置…")
         mixer_config_btn.setToolTip("设置导出格式、音量、声道检测等参数")

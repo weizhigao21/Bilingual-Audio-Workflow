@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""音频混音配置面板（声笺风格设置分组卡片）。
+"""混音配置面板（声笺风格设置分组卡片）。
 
 修改配置后自动保存到 WorkflowConfig，并发 config_changed 信号。
 """
@@ -35,7 +35,7 @@ def _readout_min_width() -> int:
 
 
 class MixerConfigPanel(QWidget):
-    """音频混音配置面板：导出格式、音量、声道等。"""
+    """混音配置面板：导出格式、音量、声道等。"""
 
     config_changed = pyqtSignal()
 

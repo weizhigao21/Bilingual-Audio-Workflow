@@ -8,7 +8,10 @@ import asyncio
 import threading
 import tempfile
 import edge_tts
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED, ThreadPoolExecutor, wait,
+)
+from . import perf
 from .tts_logger import logger
 from .tts_profile import api_cache_model
 from .local_voice_client import is_local_service, generate_local_tasks
@@ -135,12 +138,40 @@ def set_sleep_mode(prevent=True):
             logger.error(f"防休眠设置失败: {e}")
 
 
-def generate_filename(index, timestamp, text, save_dir):
+# 片段文件扩展名白名单。Edge 产物是 MP3 内容 → 新命名 .mp3；
+# 存量与 API 路径保留 .wav 命名（见 P1-2 格式收口）。
+CLIP_EXTS = (".wav", ".mp3")
+
+
+def generate_filename(index, timestamp, text, save_dir, ext=".wav"):
+    if ext not in CLIP_EXTS:
+        ext = ".wav"
     safe_text = re.sub(r"[^\u4e00-\u9fa5a-zA-Z0-9]", "", text)
     short_text = safe_text[:2] if safe_text else "无"
     safe_timestamp = timestamp.replace(":", "-")
-    file_name = f"{index:04d}_{safe_timestamp}_{short_text}.wav"
+    file_name = f"{index:04d}_{safe_timestamp}_{short_text}{ext}"
     return os.path.join(save_dir, file_name)
+
+
+def find_existing_clip(save_path):
+    """返回同名 stem 下任一扩展名已存在且非空的片段路径，都没有则 None。
+
+    跳过「已存在文件」时兼容存量混杂期：旧命名 .wav（实为 MP3）与新命名
+    .mp3 指向同一片段，命中任一都应跳过，避免重跑生成重复片段。
+    """
+    stem = save_path
+    for ext in CLIP_EXTS:
+        if stem.endswith(ext):
+            stem = stem[:-len(ext)]
+            break
+    for ext in CLIP_EXTS:
+        candidate = stem + ext
+        try:
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache, source_mtime=0, model_tag="", cancel_check=None, workflow_context=None):
@@ -154,7 +185,8 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
     cached_path = audio_cache.get_cached_audio(text, cache_model, source_version)
     if cached_path:
         try:
-            shutil.copy2(cached_path, save_path)
+            with perf.span("缓存命中"):
+                shutil.copy2(cached_path, save_path)
             logger.debug(f"缓存复用: {file_name}")
             return True, f"缓存复用: {file_name}"
         except Exception as e:
@@ -195,9 +227,11 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
 
     try:
         logger.debug(f"调用API: {api_endpoint}, 文本: {text[:20]}...")
-        resp = _get_session().post(api_endpoint, json=payload, timeout=60)
-        resp.raise_for_status()
-        res_data = resp.json()
+        perf.COUNTERS.incr("api_requests")
+        with perf.span("TTS请求"):
+            resp = _get_session().post(api_endpoint, json=payload, timeout=60)
+            resp.raise_for_status()
+            res_data = resp.json()
         if "audio_url" in res_data:
             audio_url = res_data["audio_url"]
             _download_audio(audio_url, save_path)
@@ -220,14 +254,15 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
 def _download_audio(audio_url, save_path, timeout=60):
     temp_path = None
     try:
-        with _get_session().get(audio_url, timeout=timeout, stream=True) as audio_resp:
-            audio_resp.raise_for_status()
-            with tempfile.NamedTemporaryFile(dir=os.path.dirname(save_path),
-                                             prefix=".tts-", suffix=".wav", delete=False) as tmp:
-                temp_path = tmp.name
-                for chunk in audio_resp.iter_content(chunk_size=262144):
-                    if chunk:
-                        tmp.write(chunk)
+        with perf.span("TTS请求"):
+            with _get_session().get(audio_url, timeout=timeout, stream=True) as audio_resp:
+                audio_resp.raise_for_status()
+                with tempfile.NamedTemporaryFile(dir=os.path.dirname(save_path),
+                                                 prefix=".tts-", suffix=".wav", delete=False) as tmp:
+                    temp_path = tmp.name
+                    for chunk in audio_resp.iter_content(chunk_size=262144):
+                        if chunk:
+                            tmp.write(chunk)
         if os.path.getsize(temp_path) == 0:
             raise ValueError("服务器返回空音频")
         os.replace(temp_path, save_path)
@@ -251,6 +286,42 @@ def test_api_server(url, timeout=5):
         return False, f"异常: {e}"
 
 
+class BulkRequestCancelled(Exception):
+    """批量请求被用户停止（结果语义 = 已停止，不是失败）。"""
+
+
+def _post_bulk_with_cancel(endpoint, payload, cancel_check=None, timeout=300, poll=0.25):
+    """带取消缝的批量 POST（P2-2）。
+
+    远程 /infer_bulk 无取消端点，在途请求无法撤回：与其等满 timeout，
+    不如把在途请求丢给守护线程随进程消亡，调用方按 poll 粒度检测停止
+    信号后立即返回「已停止」。无半成品缓存写入风险——响应被废弃，
+    缓存写入只发生在正常返回路径。
+    """
+    if cancel_check is not None and cancel_check():
+        raise BulkRequestCancelled()
+
+    box = {}
+    done = threading.Event()
+
+    def _run():
+        try:
+            box["resp"] = _get_session().post(endpoint, json=payload, timeout=timeout)
+        except Exception as exc:
+            box["exc"] = exc
+        finally:
+            done.set()
+
+    runner = threading.Thread(target=_run, daemon=True)
+    runner.start()
+    while not done.wait(poll):
+        if cancel_check is not None and cancel_check():
+            raise BulkRequestCancelled()
+    if "exc" in box:
+        raise box["exc"]
+    return box["resp"]
+
+
 def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_check=None, workflow_context=None):
     results = [None] * len(tasks)
 
@@ -267,7 +338,8 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
         cached_path = audio_cache.get_cached_audio(text, cache_model, source_version)
         if cached_path:
             try:
-                shutil.copy2(cached_path, save_path)
+                with perf.span("缓存命中"):
+                    shutil.copy2(cached_path, save_path)
                 results[i] = (True, f"缓存复用: {file_name}")
                 continue
             except Exception as e:
@@ -318,33 +390,60 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
 
     try:
         logger.debug(f"批量API请求: {api_endpoint}, 文本数: {len(texts)}")
-        resp = _get_session().post(api_endpoint, json=payload, timeout=300)
-        resp.raise_for_status()
-        res_data = resp.json()
+        perf.COUNTERS.incr("api_requests")
+        with perf.span("TTS请求"):
+            resp = _post_bulk_with_cancel(api_endpoint, payload, cancel_check)
+            resp.raise_for_status()
+            res_data = resp.json()
 
         if "audio_urls" in res_data:
             audio_urls = res_data["audio_urls"]
-            # 并行下载音频
+            # 并行下载音频（可取消：停止后不再等在途下载排空）
             download_futures = {}
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            executor = ThreadPoolExecutor(max_workers=5)
+            cancelled_during_download = False
+            try:
                 for i, (task, audio_url) in enumerate(zip(uncached_tasks, audio_urls)):
                     idx, timestamp, text, save_dir, _ = task
                     save_path = generate_filename(idx, timestamp, text, save_dir)
-                    future = executor.submit(_download_audio, audio_url, save_path)
+                    # wrap 把当前线程的 PerfTimer 带进下载线程，TTS请求耗时不丢账
+                    future = executor.submit(perf.wrap(_download_audio), audio_url, save_path)
                     download_futures[future] = (i, save_path, text)
 
-                for future in as_completed(download_futures):
-                    i, save_path, text = download_futures[future]
-                    idx, timestamp, _, save_dir, file_mtime = uncached_tasks[i]
-                    file_name = os.path.basename(save_path)
-                    source_version = str(int(file_mtime))
-                    try:
-                        future.result()
-                        audio_cache.save_audio_cache(text, save_path, cache_model, api_url, source_version=source_version)
-                        results[uncached_indices[i]] = (True, f"批量完成: {file_name}")
-                    except Exception as e:
-                        logger.error(f"下载音频失败: {file_name} - {e}")
-                        results[uncached_indices[i]] = (False, f"下载异常: {file_name} - {str(e)}")
+                pending_futures = set(download_futures)
+                while pending_futures:
+                    # wait 超时轮询：全部下载都在途时也能按 poll 粒度看到停止信号，
+                    # 不像 as_completed 要等首个完成才回到循环头。
+                    if cancel_check is not None and cancel_check():
+                        cancelled_during_download = True
+                        for pending in pending_futures:
+                            pending.cancel()
+                        break
+                    done_set, pending_futures = wait(
+                        pending_futures, timeout=0.25,
+                        return_when=FIRST_COMPLETED)
+                    for future in done_set:
+                        i, save_path, text = download_futures[future]
+                        idx, timestamp, _, save_dir, file_mtime = uncached_tasks[i]
+                        file_name = os.path.basename(save_path)
+                        source_version = str(int(file_mtime))
+                        try:
+                            future.result()
+                            audio_cache.save_audio_cache(text, save_path, cache_model, api_url, source_version=source_version)
+                            results[uncached_indices[i]] = (True, f"批量完成: {file_name}")
+                        except Exception as e:
+                            logger.error(f"下载音频失败: {file_name} - {e}")
+                            results[uncached_indices[i]] = (False, f"下载异常: {file_name} - {str(e)}")
+            finally:
+                executor.shutdown(wait=not cancelled_during_download,
+                                  cancel_futures=cancelled_during_download)
+
+            if cancelled_during_download:
+                logger.info("批量下载已停止")
+                for i in uncached_indices:
+                    if results[i] is None:
+                        results[i] = (False, "已停止")
+                return results
 
             # 服务器未返回音频的任务补标记，避免 results 中出现 None
             for i in range(len(uncached_tasks)):
@@ -357,6 +456,12 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
                 idx, timestamp, text, save_dir, file_mtime = tasks[i]
                 success, msg = tts_task(idx, timestamp, text, api_url, model_name, save_dir, audio_cache, int(file_mtime), model_tag)
                 results[i] = (success, msg)
+    except BulkRequestCancelled:
+        logger.info("批量API请求已停止")
+        for i in uncached_indices:
+            if results[i] is None:
+                results[i] = (False, "已停止")
+        return results
     except requests.exceptions.ConnectionError:
         logger.error(f"批量API连接失败: {api_endpoint}, 回退到逐条模式")
         for i, task in zip(uncached_indices, uncached_tasks):
@@ -380,7 +485,8 @@ async def _edge_tts_generate(text, voice, rate, volume, save_path):
 
 
 def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_cache, source_mtime=0, max_retries=3):
-    save_path = generate_filename(index, timestamp, text, save_dir)
+    # Edge 产物是 MP3 内容，按真实格式命名为 .mp3（P1-2 格式收口）
+    save_path = generate_filename(index, timestamp, text, save_dir, ext=".mp3")
     file_name = os.path.basename(save_path)
 
     source_version = str(int(source_mtime))
@@ -388,7 +494,8 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
     cached_path = audio_cache.get_cached_audio(cache_key, "edge_tts", source_version)
     if cached_path:
         try:
-            shutil.copy2(cached_path, save_path)
+            with perf.span("缓存命中"):
+                shutil.copy2(cached_path, save_path)
             logger.debug(f"Edge TTS缓存复用: {file_name}")
             return True, f"缓存复用: {file_name}"
         except Exception as e:
@@ -399,17 +506,19 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
     _edge_acquire()
     try:
         for attempt in range(1, max_retries + 1):
-            temp_path = save_path.replace(".wav", ".mp3")
+            # 写入 .part 临时名再原子改名：中途失败的残留文件不会被
+            # mix 扫描（parse_filename）误认为正式片段。
+            temp_path = save_path + ".part"
             try:
                 logger.debug(f"Edge TTS生成 (尝试 {attempt}/{max_retries}): 声音={voice}, 文本={text[:20]}...")
-                asyncio.run(asyncio.wait_for(
-                    _edge_tts_generate(text, voice, rate, volume, temp_path),
-                    timeout=15
-                ))
+                perf.COUNTERS.incr("wss_requests")
+                with perf.span("TTS请求"):
+                    asyncio.run(asyncio.wait_for(
+                        _edge_tts_generate(text, voice, rate, volume, temp_path),
+                        timeout=15
+                    ))
                 audio_cache.save_audio_cache(cache_key, temp_path, "edge_tts", "edge_tts", ext=".mp3", source_version=source_version)
-                if temp_path != save_path:
-                    shutil.copy2(temp_path, save_path)
-                    os.unlink(temp_path)
+                os.replace(temp_path, save_path)
                 logger.info(f"Edge TTS完成: {file_name}")
                 return True, f"完成: {file_name}"
             except asyncio.TimeoutError:

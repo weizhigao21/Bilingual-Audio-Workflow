@@ -127,8 +127,8 @@ class TaskInfo:
 
     # 各步骤状态
     step1_status: str = STEP_PENDING   # 字幕提取
-    step2_status: str = STEP_PENDING   # 语音生成
-    step3_status: str = STEP_PENDING   # 音频混音
+    step2_status: str = STEP_PENDING   # 配音
+    step3_status: str = STEP_PENDING   # 混音
 
     # 各步骤输出（成功后填入）
     step1_output: str = ""             # 字幕文件路径
@@ -333,7 +333,7 @@ class TaskInfo:
                 continue
             if tts_config is not None and not profile_matches(tts_dir, tts_config):
                 continue
-            wavs = [f for f in os.listdir(tts_dir) if f.endswith(".wav")]
+            wavs = [f for f in os.listdir(tts_dir) if f.endswith((".wav", ".mp3"))]
             if not wavs:
                 continue
             if index > 0:

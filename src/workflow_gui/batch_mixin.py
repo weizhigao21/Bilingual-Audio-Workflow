@@ -45,7 +45,7 @@ class BatchMixin:
 
         group = SettingsGroup("执行步骤",
                               f"将对 {len(self.task_queue.tasks)} 个任务批量执行以下步骤")
-        step_names = {1: "步骤1: 字幕提取", 2: "步骤2: 语音生成", 3: "步骤3: 音频混音"}
+        step_names = {1: "步骤1: 字幕提取", 2: "步骤2: 配音", 3: "步骤3: 混音"}
         checks = {}
         for step in (1, 2, 3):
             cb = QCheckBox(step_names[step])
@@ -65,7 +65,7 @@ class BatchMixin:
             ("按任务", "by_task"),
         ])
         order_desc = QLabel(
-            "流水线：字幕就绪即语音→混音（推荐）\n"
+            "流水线：字幕就绪即配音→混音（推荐）\n"
             "按步骤：先全部字幕→再全部语音→再全部混音\n"
             "按任务：每个任务跑完三步再跑下一个"
         )

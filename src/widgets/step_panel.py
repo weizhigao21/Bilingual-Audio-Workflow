@@ -5,8 +5,11 @@
 等宽输出路径（RichText 渲染为可点击链接，单行省略 + 悬停完整内容），
 底部按钮行（主按钮唯一）。
 """
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFontMetrics
+import os
+import subprocess
+
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QFontMetrics
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy,
     QVBoxLayout
@@ -98,7 +101,10 @@ class StepPanel(QFrame):
         self.output_label.setProperty("role", "mono")
         self.output_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextBrowserInteraction)
-        self.output_label.setOpenExternalLinks(True)
+        # 链接自行分发（P2-4）：路径链接打开文件，folder: 链接定位所在目录。
+        # openExternalLinks 直开只能做到"打开"，拦不到 explorer /select 定位。
+        self.output_label.setOpenExternalLinks(False)
+        self.output_label.linkActivated.connect(self._on_output_link)
         # 长路径不得反向撑宽卡片（否则窄窗口下被裁切，还会引发二次布局）
         self.output_label.setMinimumWidth(1)
         self.output_label.setSizePolicy(QSizePolicy.Policy.Ignored,
@@ -153,7 +159,33 @@ class StepPanel(QFrame):
 
     def set_detail(self, text: str):
         self.detail_label.setText(text)
+        # set_error 之后要能退回常规次要色；属性未变不 repolish，避免
+        # 运行期每次进度刷新都重算 QSS
+        if self.detail_label.property("role") != "secondary":
+            self.detail_label.setProperty("role", "secondary")
+            repolish(self.detail_label)
+        if self.detail_label.toolTip():
+            self.detail_label.setToolTip("")
         self.detail_label.setVisible(bool(text))
+
+    def set_error(self, text: str):
+        """失败原因直达：首行显示在 detail（错误色），全文进悬停提示。
+
+        detail 标签允许换行，长错误会把卡片撑高、切换任务时中央列跳动，
+        因此只显示首行（超长截断加省略号）；全文放在 tooltip 与运行日志。
+        """
+        full = (text or "").strip()
+        if not full:
+            self.set_detail("")
+            return
+        first = full.splitlines()[0]
+        if len(first) > 72:
+            first = first[:72] + "…"
+        self.detail_label.setText(first)
+        self.detail_label.setProperty("role", "error")
+        repolish(self.detail_label)
+        self.detail_label.setToolTip(full)
+        self.detail_label.setVisible(True)
 
     def _placeholder_text(self) -> str:
         return f"{self._output_prefix}：尚未生成"
@@ -189,17 +221,42 @@ class StepPanel(QFrame):
             self.output_label.setText(self._placeholder_text())
             return
         head = f"{prefix}："
+        link_text = "打开文件夹"
         metrics = QFontMetrics(self.output_label.font())
         width = self.output_label.width()
         if width < 80:
             # 尚未完成首次布局：先放完整路径，后续 resizeEvent 会收敛
             shown = path
         else:
-            avail = max(60, width - metrics.horizontalAdvance(head) - 4)
+            # 省略预算要扣掉「打开文件夹」链接宽度，否则链接会被挤出可视区
+            reserve = metrics.horizontalAdvance(link_text) + 10
+            avail = max(60, width - metrics.horizontalAdvance(head) - reserve - 4)
             shown = metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, avail)
+        escaped_path = _html_escape(path, quote=True)
         self.output_label.setText(
-            f'{head}<a href="file:///{_html_escape(path, quote=True)}">'
-            f'{_html_escape(shown)}</a>')
+            f'{head}<a href="file:///{escaped_path}">{_html_escape(shown)}</a> '
+            f'<a href="folder:{escaped_path}">{link_text}</a>')
+
+    def _on_output_link(self, url: str):
+        """输出行链接分发：路径链接打开文件；folder: 链接定位所在文件夹。"""
+        if url.startswith("folder:"):
+            self._reveal_in_explorer(url[len("folder:"):])
+        elif url.startswith("file:"):
+            QDesktopServices.openUrl(QUrl(url))
+
+    @staticmethod
+    def _reveal_in_explorer(path: str):
+        """资源管理器中定位并高亮文件（explorer /select），失败退化为打开目录。"""
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                return
+        except Exception:
+            pass
+        try:
+            os.startfile(os.path.dirname(path) or path)
+        except Exception:
+            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

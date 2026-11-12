@@ -354,12 +354,15 @@ class SetupDialog(QDialog):
             "whisper_dir": self.whisper_edit.text().strip(),
         }
         workspace = self.workspace_edit.text().strip()
+        # 校验提示用中文显示名，不把配置键名（whisper_dir 等）甩给用户
+        display_names = {"whisper_dir": "字幕提取程序目录"}
         errors = []
         for key, path in values.items():
             if not WorkflowConfig._validate_subproject(key, path):
-                errors.append(f"  - {key}: 路径无效或缺少必要文件")
+                errors.append(
+                    f"  - {display_names.get(key, key)}：路径无效或缺少必要文件（infer.exe）")
         if not workspace:
-            errors.append("  - workspace_dir: 未指定工作区目录")
+            errors.append("  - 工作区目录：未指定")
         if errors:
             self._set_status("验证失败：\n" + "\n".join(errors), ok=False)
             return False

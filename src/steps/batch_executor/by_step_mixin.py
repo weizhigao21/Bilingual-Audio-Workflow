@@ -18,7 +18,7 @@ class ByStepMixin:
             if self._stop_flag:
                 break
 
-            step_name = {1: "字幕提取", 2: "语音生成", 3: "音频混音"}.get(step, f"步骤{step}")
+            step_name = {1: "字幕提取", 2: "配音", 3: "混音"}.get(step, f"步骤{step}")
             self.log_signal.emit(f"\n[批量] ===== {step_name}(步骤{step}): 处理全部 {total} 个任务 =====")
 
             # 多文件统一交给字幕工作器；--enable_batching 仅控制 infer 内部批处理。

@@ -7,6 +7,8 @@ import threading
 import tempfile
 import time
 
+from . import perf
+
 
 def get_resource_path(relative_path):
     if getattr(sys, "frozen", False):
@@ -127,11 +129,13 @@ class AudioCache:
                 "SELECT audio_path FROM audio_cache WHERE text_hash = ?", (text_hash,)
             ).fetchone()
         if not row:
+            perf.COUNTERS.incr("cache_miss")
             return None
 
         audio_path = row[0]
         # 文件校验是磁盘 I/O，移出锁外，命中路径因此完全没有写事务。
         if os.path.isfile(audio_path) and os.path.getsize(audio_path) > 0:
+            perf.COUNTERS.incr("cache_hit")
             self._note_use(text_hash)
             return audio_path
 
@@ -139,6 +143,7 @@ class AudioCache:
             conn = self._get_conn()
             conn.execute("DELETE FROM audio_cache WHERE text_hash = ?", (text_hash,))
             conn.commit()
+        perf.COUNTERS.incr("cache_miss")
         return None
 
     def get_cache_file_path(self, text_hash, ext=".wav"):
@@ -176,6 +181,7 @@ class AudioCache:
                 )
                 # 这是缓存索引数据，必须立即落盘，不能等 close()。
                 conn.commit()
+            perf.COUNTERS.incr("cache_write")
             return True
         except Exception:
             return False

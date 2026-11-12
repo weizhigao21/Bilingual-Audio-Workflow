@@ -17,6 +17,7 @@ from .audio_utils.ffmpeg_utils import (
     decode_audio_to_pcm, export_pcm_file, export_pcm_wav,
 )
 from .audio_metadata import mix_metadata_options, remember_mix_metadata
+from . import perf
 
 
 def _release_mapped_source(mapped):
@@ -52,7 +53,7 @@ def _remove_work_dir(work_dir, log):
             return
         except OSError as exc:
             if attempt == 4:
-                log(f"[音频混音] 警告：临时目录清理失败: {work_dir} - {exc}")
+                log(f"[混音] 警告：临时目录清理失败: {work_dir} - {exc}")
                 return
             gc.collect()
             time.sleep(0.02)
@@ -84,13 +85,15 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
     work_dir = None
     mapped_source = None
     try:
-        log(f"[音频混音] 启用长音频分块处理: {duration / 60:.1f} 分钟")
+        log(f"[混音] 启用长音频分块处理: {duration / 60:.1f} 分钟")
         work_dir = tempfile.mkdtemp(dir=output_folder, prefix=".mix-work-")
         source_pcm = os.path.join(work_dir, "source.raw")
         accumulator = os.path.join(work_dir, "accumulator.raw")
         mixed_pcm = os.path.join(work_dir, "mixed.raw")
         progress(5)
-        decode_audio_to_pcm(task.source_path, source_pcm, stop_check=stop_check)
+        # 源音轨解码计入「片段解码」桶（七段口径没有单列提取音轨）
+        with perf.span("片段解码"):
+            decode_audio_to_pcm(task.source_path, source_pcm, stop_check=stop_check)
         check_stop()
         if os.path.getsize(source_pcm) == 0:
             raise ValueError("源文件没有可解码的音频")
@@ -102,32 +105,35 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
                                         frame_rate=source_rate, channels=2)
                 angles = {}
                 if cfg.get("channel_detect", True):
-                    log("[音频混音] 检测声道位置...")
-                    angles = detect_angles_parallel(
-                        original, clips,
-                        angles_from_config(cfg),
-                        max_workers=cfg.get("thread_count", 4),
-                    )
+                    log("[混音] 检测声道位置...")
+                    with perf.span("声道检测"):
+                        angles = detect_angles_parallel(
+                            original, clips,
+                            angles_from_config(cfg),
+                            max_workers=cfg.get("thread_count", 4),
+                        )
                 progress(25)
                 mix_items = [
                     (os.path.join(task.step2_output, clip["filename"]),
                      clip["timestamp_ms"], angles.get(clip["filename"], 180))
                     for clip in clips
                 ]
-                log(f"[音频混音] 分块合成 {len(mix_items)} 个配音片段...")
-                mix_with_numpy(
-                    original, mix_items,
-                    volume_db=cfg.get("volume_db", 0.0),
-                    auto_volume=cfg.get("auto_volume", "off"),
-                    align_onset=cfg.get("align_onset", False),
-                    content_alignment=cfg.get("content_alignment", False),
-                    peak_mode=cfg.get("peak_mode", "peak"),
-                    high_quality=cfg.get("high_quality_resample", True),
-                    stop_check=stop_check,
-                    output_path=mixed_pcm,
-                    accumulator_path=accumulator,
-                    item_callback=lambda done, total: progress(25 + int(done * 45 / total)),
-                )
+                log(f"[混音] 分块合成 {len(mix_items)} 个配音片段...")
+                with perf.span("混音累加"):
+                    mix_with_numpy(
+                        original, mix_items,
+                        volume_db=cfg.get("volume_db", 0.0),
+                        auto_volume=cfg.get("auto_volume", "off"),
+                        align_onset=cfg.get("align_onset", False),
+                        content_alignment=cfg.get("content_alignment", False),
+                        peak_mode=cfg.get("peak_mode", "peak"),
+                        high_quality=cfg.get("high_quality_resample", True),
+                        stop_check=stop_check,
+                        max_workers=cfg.get("thread_count", 4),
+                        output_path=mixed_pcm,
+                        accumulator_path=accumulator,
+                        item_callback=lambda done, total: progress(25 + int(done * 45 / total)),
+                    )
             finally:
                 # 断开本帧对 AudioSegment（进而对 mmap）的引用；关闭失败不覆盖原异常。
                 original = None
@@ -141,20 +147,21 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
         output_rate = int(cfg.get("audio_sample_rate", 44100))
         channels = int(cfg.get("audio_channels", 2))
         high_quality = cfg.get("high_quality_resample", True)
-        log("[音频混音] 分块导出中...")
-        if output_format == "wav":
-            export_pcm_wav(
-                mixed_pcm, export_path, source_rate, output_rate, channels,
-                int(cfg.get("wav_bit_depth", 16)), work_dir,
-                high_quality=high_quality, stop_check=stop_check,
-            )
-        else:
-            export_pcm_file(
-                mixed_pcm, task.source_path if is_video else None,
-                export_path, output_format, source_rate, bitrate, output_rate,
-                channels, high_quality=high_quality, stop_check=stop_check,
-                metadata_options=metadata_options,
-            )
+        log("[混音] 分块导出中...")
+        with perf.span("导出"):
+            if output_format == "wav":
+                export_pcm_wav(
+                    mixed_pcm, export_path, source_rate, output_rate, channels,
+                    int(cfg.get("wav_bit_depth", 16)), work_dir,
+                    high_quality=high_quality, stop_check=stop_check,
+                )
+            else:
+                export_pcm_file(
+                    mixed_pcm, task.source_path if is_video else None,
+                    export_path, output_format, source_rate, bitrate, output_rate,
+                    channels, high_quality=high_quality, stop_check=stop_check,
+                    metadata_options=metadata_options,
+                )
         check_stop()
         os.replace(export_path, final_output)
         export_path = None
@@ -162,12 +169,12 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
         try:
             remember_mix_metadata(task, tags)
         except OSError as exc:
-            log(f"[音频混音] 警告：任务记录写入失败: {exc}")
+            log(f"[混音] 警告：任务记录写入失败: {exc}")
         progress(100)
-        log(f"[音频混音] 完成: {final_output}")
+        log(f"[混音] 完成: {final_output}")
         return True, final_output
     except Exception as exc:
-        log(f"[音频混音] 分块处理失败: {exc}")
+        log(f"[混音] 分块处理失败: {exc}")
         return False, str(exc)
     finally:
         # 业务异常已在上面消化：此时异常回溯释放，再关一次 mmap，Windows 才能
@@ -177,5 +184,5 @@ def mix_streaming_task(task, cfg, final_output, is_video, audio_info,
             try:
                 os.unlink(export_path)
             except OSError as exc:
-                log(f"[音频混音] 警告：临时成品清理失败: {exc}")
+                log(f"[混音] 警告：临时成品清理失败: {exc}")
         _remove_work_dir(work_dir, log)
