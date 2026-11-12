@@ -9,8 +9,8 @@ import os
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPushButton, QScrollArea, QStackedWidget,
-    QTabBar, QVBoxLayout, QWidget
+    QDialog, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
+    QStackedWidget, QTabBar, QVBoxLayout, QWidget
 )
 
 from ..config import SetupDialog, WorkflowConfig
@@ -49,8 +49,94 @@ class GeneralSettingsPage(QWidget):
         self.status_label.setProperty("role", "secondary")
         group.add_widget_row(self.status_label)
         layout.addWidget(group)
+
+        # 性能（P2-5）：四个并发参数集中一处，实时预览有效并发
+        perf_group = SettingsGroup(
+            "性能",
+            "并发参数集中在一处；实际并发取两者中较小值，推荐保持默认。")
+        self.threads_spin = QSpinBox()
+        self.threads_spin.setRange(1, 20)
+        self.threads_spin.setToolTip(
+            "所有配音共用一个合成线程池（不随音频数叠加）。\n"
+            "实际并发路数取本项与「配音全局并发上限」的较小值；\n"
+            "建议两项设为同一个值（默认 8）。")
+        self.threads_spin.valueChanged.connect(self._save_perf)
+        perf_group.add_row("配音线程池", "所有音频共享的合成线程池", self.threads_spin)
+
+        self.max_concurrent_spin = QSpinBox()
+        self.max_concurrent_spin.setRange(1, 20)
+        self.max_concurrent_spin.setToolTip(
+            "同时真正发出的合成请求数上限，防止触发限流。\n"
+            "实际并发路数取本项与「配音线程池」的较小值；\n"
+            "建议两项设为同一个值（默认 8）。")
+        self.max_concurrent_spin.valueChanged.connect(self._save_perf)
+        perf_group.add_row("配音全局并发上限", "请求闸门，防止触发限流",
+                           self.max_concurrent_spin)
+
+        self.pipeline_tts_spin = QSpinBox()
+        self.pipeline_tts_spin.setRange(1, 10)
+        self.pipeline_tts_spin.setToolTip(
+            "流水线模式下同时进行配音的音频数（任务级并行）。\n"
+            "片段级并发由「配音全局并发上限」统一控制，不叠加。")
+        self.pipeline_tts_spin.valueChanged.connect(self._save_perf)
+        perf_group.add_row("流水线任务并行", "流水线模式下同时配音的音频数",
+                           self.pipeline_tts_spin)
+
+        self.mixer_threads_spin = QSpinBox()
+        self.mixer_threads_spin.setRange(1, 32)
+        self.mixer_threads_spin.setSuffix(" 线程")
+        self.mixer_threads_spin.setToolTip("混音与声道检测的并行线程数。")
+        self.mixer_threads_spin.valueChanged.connect(self._save_perf)
+        perf_group.add_row("混音并行线程", "混音与声道检测的并行度",
+                           self.mixer_threads_spin)
+
+        self.perf_preview = QLabel("")
+        self.perf_preview.setWordWrap(True)
+        self.perf_preview.setProperty("role", "secondary")
+        perf_group.add_widget_row(self.perf_preview)
+
+        # 初值加载（阻断信号，避免 __init__ 期间触发保存）
+        perf_spins = (self.threads_spin, self.max_concurrent_spin,
+                      self.pipeline_tts_spin, self.mixer_threads_spin)
+        for w in perf_spins:
+            w.blockSignals(True)
+        self.threads_spin.setValue(config.tts_cfg.get("edge_threads", 8))
+        self.max_concurrent_spin.setValue(config.tts_cfg.get("edge_max_concurrent", 8))
+        self.pipeline_tts_spin.setValue(config.tts_cfg.get("pipeline_tts_workers", 2))
+        self.mixer_threads_spin.setValue(config.mixer_cfg.get("thread_count", 4))
+        for w in perf_spins:
+            w.blockSignals(False)
+        self._update_perf_preview()
+
+        layout.addWidget(perf_group)
         layout.addStretch(1)
         self._validate()
+
+    def _update_perf_preview(self):
+        """实时预览有效并发 = min(线程池, 全局并发上限)。"""
+        pool = self.threads_spin.value()
+        gate = self.max_concurrent_spin.value()
+        self.perf_preview.setText(
+            f"有效配音并发 = {min(pool, gate)} 路"
+            f"（配音线程池 {pool} 与全局并发上限 {gate} 取小）；"
+            f"混音并行 {self.mixer_threads_spin.value()} 线程；"
+            f"流水线任务并行 {self.pipeline_tts_spin.value()}。")
+
+    def _save_perf(self):
+        """性能区独立保存：不受路径校验门禁影响。"""
+        self._update_perf_preview()
+        self.config.tts_cfg["edge_threads"] = self.threads_spin.value()
+        self.config.tts_cfg["edge_max_concurrent"] = self.max_concurrent_spin.value()
+        self.config.tts_cfg["pipeline_tts_workers"] = self.pipeline_tts_spin.value()
+        self.config.mixer_cfg["thread_count"] = self.mixer_threads_spin.value()
+        try:
+            self.config.save()
+        except OSError:
+            self.status_label.setText("保存失败：无法写入配置文件")
+            self.status_label.setProperty("role", "error")
+            repolish(self.status_label)
+            return
+        self.config_changed.emit()
 
     def _validate(self):
         whisper = self.whisper_row.text().strip()

@@ -224,7 +224,7 @@ class MixerConfigPanel(QWidget):
         layout.addWidget(output)
 
         # 高级
-        advanced = SettingsGroup("高级", "重采样质量、线程与内存策略。")
+        advanced = SettingsGroup("高级", "重采样质量与内存策略。")
         self.resample_check = QCheckBox("高质量重采样（采样率不同时更慢）")
         self.resample_check.setToolTip(
             "配音和输出采样率转换使用 FFmpeg 64 点滤波；关闭后配音使用快速转换。"
@@ -232,11 +232,7 @@ class MixerConfigPanel(QWidget):
         self.resample_check.toggled.connect(self._save)
         advanced.add_widget_row(self.resample_check)
 
-        self.thread_spin = QSpinBox()
-        self.thread_spin.setRange(1, 32)
-        self.thread_spin.setSuffix(" 线程")
-        self.thread_spin.valueChanged.connect(self._save)
-        advanced.add_row("线程数", "FFmpeg 编码线程", self.thread_spin)
+        # 并行线程数已整合到设置「常规 → 性能」区（P2-5）
 
         self.streaming_spin = QSpinBox()
         self.streaming_spin.setRange(0, 240)
@@ -315,7 +311,7 @@ class MixerConfigPanel(QWidget):
                    self.align_check, self.content_align_check, self.resample_check,
                    self.suffix_check, self.folder_prefix_check,
                    self.output_prefix_check,
-                   self.skip_check, self.thread_spin, self.streaming_spin,
+                   self.skip_check, self.streaming_spin,
                    self.batch_parallel_check, self.metadata_check]
         for w in widgets:
             w.blockSignals(True)
@@ -375,7 +371,6 @@ class MixerConfigPanel(QWidget):
             self.output_prefix_check.setChecked(cfg.get("output_folder_prefix", False))
             self.skip_check.setChecked(cfg.get("skip_existing", True))
             self.metadata_check.setChecked(cfg.get("metadata_enabled", True))
-            self.thread_spin.setValue(cfg.get("thread_count", 4))
             self.streaming_spin.setValue(cfg.get("streaming_threshold_minutes", 20))
             self.batch_parallel_check.setChecked(cfg.get("enable_batch_parallel", True))
         finally:
@@ -408,7 +403,6 @@ class MixerConfigPanel(QWidget):
         cfg["output_folder_prefix"] = self.output_prefix_check.isChecked()
         cfg["skip_existing"] = self.skip_check.isChecked()
         cfg["metadata_enabled"] = self.metadata_check.isChecked()
-        cfg["thread_count"] = self.thread_spin.value()
         cfg["streaming_threshold_minutes"] = self.streaming_spin.value()
         cfg["enable_batch_parallel"] = self.batch_parallel_check.isChecked()
         self.config.save()

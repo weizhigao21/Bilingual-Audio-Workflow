@@ -2,6 +2,7 @@ import os
 import re
 import time
 import ctypes
+import random
 import requests
 import shutil
 import asyncio
@@ -9,7 +10,7 @@ import threading
 import tempfile
 import edge_tts
 from concurrent.futures import (
-    FIRST_COMPLETED, ThreadPoolExecutor, wait,
+    FIRST_COMPLETED, Future, ThreadPoolExecutor, wait,
 )
 from . import perf
 from .tts_logger import logger
@@ -33,6 +34,53 @@ def _get_session() -> requests.Session:
         session = requests.Session()
         _thread_local.session = session
     return session
+
+
+# ---- 同键 in-flight 合并（P1-3）-------------------------------------------
+# 同一批次内相同缓存键（文本+声音+参数）并发请求时只发一次，后来者等
+# 先行者落缓存后直接复用。先行者异常只结束等待、不传播给等待者——等待者
+# 自行走完整生成路径，保证失败不互相拖死。
+_inflight_lock = threading.Lock()
+_inflight = {}  # inflight_key -> Future
+
+
+def _inflight_enter(key):
+    """登记 in-flight 键。返回 (future, is_owner)。"""
+    with _inflight_lock:
+        fut = _inflight.get(key)
+        if fut is not None:
+            return fut, False
+        fut = Future()
+        _inflight[key] = fut
+        return fut, True
+
+
+def _inflight_exit(key, fut):
+    """先行者结束：摘除登记并唤醒等待者（无论成败都不抛异常）。"""
+    with _inflight_lock:
+        _inflight.pop(key, None)
+    if not fut.done():
+        fut.set_result(None)
+
+
+def _inflight_wait(key, fut, cache_probe):
+    """等待先行者完成后查询其缓存产物。
+
+    返回缓存路径表示可复用；None 表示需自行生成
+    （先行者失败 / 等待超时 / 缓存未落盘）。
+    """
+    try:
+        fut.result(timeout=120)
+    except Exception:
+        pass
+    perf.COUNTERS.incr("dedup_merged")
+    return cache_probe()
+
+
+def _retry_backoff(attempt):
+    """重试退避 0.5/1/2 秒 + 25% 抖动，避免限流时多线程同步撞车。"""
+    delay = min(0.5 * (2 ** (attempt - 1)), 2.0)
+    return delay + random.uniform(0.0, delay * 0.25)
 
 
 def _safe_unlink(path):
@@ -201,6 +249,23 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
     api_base_url = api_url.rstrip("/")
     api_endpoint = f"{api_base_url}/infer_single"
 
+    # 同键 in-flight 合并（P1-3）：等先行者产出缓存后直接复用；
+    # 先行者失败时重新竞争，同键补偿请求同一时刻最多 1 个
+    inflight_key = f"api|{cache_model}|{source_version}|{text}"
+    while True:
+        future, owner = _inflight_enter(inflight_key)
+        if owner:
+            break
+        cached_path = _inflight_wait(inflight_key, future, lambda: audio_cache.get_cached_audio(text, cache_model, source_version))
+        if cached_path:
+            try:
+                with perf.span("缓存命中"):
+                    shutil.copy2(cached_path, save_path)
+                logger.debug(f"同键合并复用: {file_name}")
+                return True, f"缓存复用: {file_name}"
+            except Exception as e:
+                logger.warning(f"缓存复制失败: {file_name} - {e}")
+
     payload = {
         "batch_size": 10,
         "batch_threshold": 0.75,
@@ -249,6 +314,9 @@ def tts_task(index, timestamp, text, api_url, model_name, save_dir, audio_cache,
     except Exception as e:
         logger.error(f"API调用异常: {file_name} - {e}", exc_info=True)
         return False, f"异常: {str(e)}"
+    finally:
+        if owner:
+            _inflight_exit(inflight_key, future)
 
 
 def _download_audio(audio_url, save_path, timeout=60):
@@ -362,7 +430,23 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
     api_base_url = api_url.rstrip("/")
     api_endpoint = f"{api_base_url}/infer_bulk"
 
-    texts = [t[2] for t in uncached_tasks]
+    # 同键合并（P1-3）：同批相同文本+版本只发一次请求，其余复用下载结果
+    unique_first = []   # 每个唯一键在 uncached_tasks 中的首个下标
+    dup_groups = {}     # 首个下标 -> 其余同键下标
+    seen_keys = {}
+    for i, task in enumerate(uncached_tasks):
+        dedup_key = (task[2], str(int(task[4])))
+        first = seen_keys.get(dedup_key)
+        if first is None:
+            seen_keys[dedup_key] = i
+            unique_first.append(i)
+        else:
+            dup_groups.setdefault(first, []).append(i)
+            perf.COUNTERS.incr("dedup_merged")
+    if len(unique_first) < len(uncached_tasks):
+        logger.info(f"批量同键合并: {len(uncached_tasks)} 条文本 -> {len(unique_first)} 条请求")
+
+    texts = [uncached_tasks[i][2] for i in unique_first]
 
     payload = {
         "batch_size": 30,
@@ -403,8 +487,8 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
             executor = ThreadPoolExecutor(max_workers=5)
             cancelled_during_download = False
             try:
-                for i, (task, audio_url) in enumerate(zip(uncached_tasks, audio_urls)):
-                    idx, timestamp, text, save_dir, _ = task
+                for i, audio_url in zip(unique_first, audio_urls):
+                    idx, timestamp, text, save_dir, _ = uncached_tasks[i]
                     save_path = generate_filename(idx, timestamp, text, save_dir)
                     # wrap 把当前线程的 PerfTimer 带进下载线程，TTS请求耗时不丢账
                     future = executor.submit(perf.wrap(_download_audio), audio_url, save_path)
@@ -431,9 +515,21 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
                             future.result()
                             audio_cache.save_audio_cache(text, save_path, cache_model, api_url, source_version=source_version)
                             results[uncached_indices[i]] = (True, f"批量完成: {file_name}")
+                            # 同键组复用同一份下载产物
+                            for j in dup_groups.get(i, ()):
+                                dup_task = uncached_tasks[j]
+                                dup_path = generate_filename(dup_task[0], dup_task[1], dup_task[2], dup_task[3])
+                                try:
+                                    shutil.copy2(save_path, dup_path)
+                                    results[uncached_indices[j]] = (True, f"批量完成: {os.path.basename(dup_path)}")
+                                except Exception as e:
+                                    logger.error(f"同键复制失败: {dup_path} - {e}")
+                                    results[uncached_indices[j]] = (False, f"复制异常: {os.path.basename(dup_path)} - {str(e)}")
                         except Exception as e:
                             logger.error(f"下载音频失败: {file_name} - {e}")
                             results[uncached_indices[i]] = (False, f"下载异常: {file_name} - {str(e)}")
+                            for j in dup_groups.get(i, ()):
+                                results[uncached_indices[j]] = (False, f"下载异常: {file_name} - {str(e)}")
             finally:
                 executor.shutdown(wait=not cancelled_during_download,
                                   cancel_futures=cancelled_during_download)
@@ -445,9 +541,9 @@ def tts_bulk_task(tasks, api_url, model_name, audio_cache, model_tag="", cancel_
                         results[i] = (False, "已停止")
                 return results
 
-            # 服务器未返回音频的任务补标记，避免 results 中出现 None
+            # 服务器未返回音频/未处理的同键任务补标记，避免 results 中出现 None
             for i in range(len(uncached_tasks)):
-                if i >= len(audio_urls):
+                if results[uncached_indices[i]] is None:
                     results[uncached_indices[i]] = (False, "服务器未返回音频")
         else:
             error_msg = res_data.get('msg', '无返回URL')
@@ -501,6 +597,22 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
         except Exception as e:
             logger.warning(f"Edge TTS缓存复制失败: {file_name} - {e}")
 
+    # 同键 in-flight 合并（P1-3）：等先行者产出缓存后直接复用；
+    # 先行者失败时重新竞争而不是一拥而上，同键补偿请求同一时刻最多 1 个
+    inflight_key = f"edge|{source_version}|{cache_key}"
+    while True:
+        future, owner = _inflight_enter(inflight_key)
+        if owner:
+            break
+        cached_path = _inflight_wait(inflight_key, future, lambda: audio_cache.get_cached_audio(cache_key, "edge_tts", source_version))
+        if cached_path:
+            try:
+                shutil.copy2(cached_path, save_path)
+                logger.debug(f"Edge TTS同键合并复用: {file_name}")
+                return True, f"缓存复用: {file_name}"
+            except Exception as e:
+                logger.warning(f"Edge TTS缓存复制失败: {file_name} - {e}")
+
     last_error = None
     # 占用全局并发额度（等待直到并发低于上限），整个片段（含重试）占用一个额度
     _edge_acquire()
@@ -539,9 +651,11 @@ def edge_tts_task(index, timestamp, text, voice, rate, volume, save_dir, audio_c
                 logger.warning(f"Edge TTS异常 (尝试 {attempt}/{max_retries}): {file_name} - {last_error}")
                 _safe_unlink(temp_path)
             if attempt < max_retries:
-                time.sleep(1)
+                time.sleep(_retry_backoff(attempt))
 
         logger.error(f"Edge TTS失败 (已重试{max_retries}次): {file_name} - {last_error}")
         return False, f"失败(已重试{max_retries}次): {last_error}"
     finally:
         _edge_release()
+        if owner:
+            _inflight_exit(inflight_key, future)

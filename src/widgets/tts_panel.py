@@ -75,38 +75,8 @@ class TTSConfigPanel(QWidget):
         self.volume_combo.editTextChanged.connect(self._save)
         self.edge_group.add_row("音量", "相对基准音量的百分比", self.volume_combo)
 
-        self.threads_spin = QSpinBox()
-        self.threads_spin.setRange(1, 20)
-        self.threads_spin.setToolTip(
-            "所有配音共用一个合成线程池（不随音频数叠加）。\n"
-            "实际并发路数由本项与「全局并发上限」中较小的一方决定；\n"
-            "建议两项设为同一个值（默认 8）。"
-        )
-        self.threads_spin.valueChanged.connect(self._save)
-        self.edge_group.add_row("线程池数量", "所有音频共享的合成线程池",
-                                self.threads_spin)
-
-        self.max_concurrent_spin = QSpinBox()
-        self.max_concurrent_spin.setRange(1, 20)
-        self.max_concurrent_spin.setToolTip(
-            "同时真正发出的合成请求数上限，防止触发微软限流。\n"
-            "实际并发路数由本项与「线程池数量」中较小的一方决定；\n"
-            "建议两项设为同一个值（默认 8）。"
-        )
-        self.max_concurrent_spin.valueChanged.connect(self._save)
-        self.edge_group.add_row("全局并发上限", "请求闸门，防止触发限流",
-                                self.max_concurrent_spin)
-
-        self.pipeline_tts_spin = QSpinBox()
-        self.pipeline_tts_spin.setRange(1, 10)
-        self.pipeline_tts_spin.setToolTip(
-            "流水线模式下同时进行配音的音频数（任务级并行）。\n"
-            "设 1 = 按音频逐个生成语音；2 = 最多 2 个音频同时生成。\n"
-            "片段级并发由「全局并发上限」统一控制（共享线程池，不叠加）。"
-        )
-        self.pipeline_tts_spin.valueChanged.connect(self._save)
-        self.edge_group.add_row("流水线语音并行", "流水线模式下的任务级并行数",
-                                self.pipeline_tts_spin)
+        # 并发参数（线程池/全局并发上限/流水线任务并行）已整合到
+        # 设置「常规 → 性能」区（P2-5），此处不再各自放一份。
 
         # API 模式参数
         self.api_group = SettingsGroup(
@@ -168,8 +138,7 @@ class TTSConfigPanel(QWidget):
         cfg = self.config.tts_cfg
         # 阻断信号，防止加载过程中 _on_mode_changed→_save 覆盖配置
         widgets = [self.voice_combo, self.rate_combo,
-                   self.volume_combo, self.threads_spin,
-                   self.max_concurrent_spin, self.pipeline_tts_spin,
+                   self.volume_combo,
                    self.api_combo,
                    self.bulk_spin, self.multi_api_check, self.bulk_check]
         for w in widgets:
@@ -187,9 +156,6 @@ class TTSConfigPanel(QWidget):
             self.voice_combo.setCurrentIndex(idx)
             self.rate_combo.setCurrentText(cfg.get("edge_rate", "+0%"))
             self.volume_combo.setCurrentText(cfg.get("edge_volume", "+0%"))
-            self.threads_spin.setValue(cfg.get("edge_threads", 8))
-            self.max_concurrent_spin.setValue(cfg.get("edge_max_concurrent", 8))
-            self.pipeline_tts_spin.setValue(cfg.get("pipeline_tts_workers", 2))
             # api 参数
             self._refresh_api_combo()
             self.bulk_spin.setValue(cfg.get("bulk_batch_size", 20))
@@ -274,9 +240,6 @@ class TTSConfigPanel(QWidget):
         self._update_voice_hint()
         cfg["edge_rate"] = self.rate_combo.currentText()
         cfg["edge_volume"] = self.volume_combo.currentText()
-        cfg["edge_threads"] = self.threads_spin.value()
-        cfg["edge_max_concurrent"] = self.max_concurrent_spin.value()
-        cfg["pipeline_tts_workers"] = self.pipeline_tts_spin.value()
         cfg["bulk_batch_size"] = self.bulk_spin.value()
         cfg["use_multi_api"] = self.multi_api_check.isChecked()
         cfg["use_bulk_api"] = self.bulk_check.isChecked()

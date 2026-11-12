@@ -111,6 +111,10 @@ def _marker_for_edit(output_path, task=None):
 def _probe_embedded_tags(output_path):
     if not supports_embedded_tags(output_path):
         return {}
+    if not os.path.isfile(output_path):
+        # 成品尚未生成时（混音开始前取标记）不起 ffprobe 空跑，
+        # 单任务探测次数从 3 降到 2（P2-3）
+        return {}
     perf.COUNTERS.incr("ffprobe_procs")
     try:
         proc = subprocess.run(

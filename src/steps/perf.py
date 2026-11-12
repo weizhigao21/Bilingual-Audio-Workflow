@@ -26,10 +26,11 @@ STAGES = ("字幕提取", "TTS请求", "缓存命中", "片段解码", "声道�
 #   ffmpeg_procs / ffprobe_procs / wss_requests / api_requests
 #   cache_hit / cache_miss / cache_write / ui_signals
 #   clip_decode_fast（soundfile 进程内解码）/ clip_decode_fallback（回退子进程）
+#   dedup_merged（同键 in-flight 合并，等待者免请求次数）
 COUNTER_KEYS = (
     "ffmpeg_procs", "ffprobe_procs", "wss_requests", "api_requests",
     "cache_hit", "cache_miss", "cache_write", "ui_signals",
-    "clip_decode_fast", "clip_decode_fallback",
+    "clip_decode_fast", "clip_decode_fallback", "dedup_merged",
 )
 
 

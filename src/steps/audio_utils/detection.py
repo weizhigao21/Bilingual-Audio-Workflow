@@ -47,6 +47,55 @@ def _voice_band_frame_energies(signal, sample_rate):
     return np.sum(fft[:, mask] ** 2, axis=1)
 
 
+def _voice_band_energy_profile(signal, sample_rate, chunk_frames=4096):
+    """全局帧网格（自样本 0 锚定）上逐帧人声带能量，一次 FFT 贯通全程。
+
+    P2-3 窗口复用的基础：各片段 10s 窗口高度重叠时，旧实现按窗口起点各自
+    切片再整窗 FFT，重叠区反复算；本函数把逐帧能量算一遍，窗口级结果退化为
+    区间求和（判定只依赖能量总和，求和可结合）。分块计算以限制瞬时内存。
+    """
+    frame_len, hop_len = _frame_params(sample_rate)
+    if len(signal) <= frame_len:
+        return np.zeros(0)
+    window = np.hanning(frame_len)
+    freqs = np.fft.rfftfreq(frame_len, 1.0 / sample_rate)
+    mask = (freqs >= VOICE_BAND[0]) & (freqs <= VOICE_BAND[1])
+    n_frames = (len(signal) - frame_len) // hop_len + 1
+    energies = np.empty(n_frames, dtype=np.float64)
+    pos = 0
+    while pos < n_frames:
+        count = min(chunk_frames, n_frames - pos)
+        start = pos * hop_len
+        end = start + (count - 1) * hop_len + frame_len
+        chunk = signal[start:end]
+        frames = np.lib.stride_tricks.sliding_window_view(chunk, frame_len)[::hop_len]
+        fft = np.abs(np.fft.rfft(frames * window, axis=1))
+        energies[pos:pos + count] = np.sum(fft[:, mask] ** 2, axis=1)
+        pos += count
+    return energies
+
+
+def _decide_channel(left_energy, right_energy, n_frames):
+    """由两声道人声带能量总和判定人声偏向。
+
+    ``detect_voice_channel``（单窗口 API）与 ``detect_angles_parallel``
+    （P2-3 窗口复用路径）共用的**唯一判定点**，保证两条路径结论一致。
+    """
+    if n_frames < 3:
+        return 'both', 0.0
+    if left_energy + right_energy < 1e-10:
+        return 'both', 0.0
+    imbalance = abs(left_energy - right_energy) / (left_energy + right_energy)
+    logger.debug(
+        f"[人声检测] 左 {left_energy:.1f} / 右 {right_energy:.1f}，"
+        f"不平衡度 {imbalance:.3f}（阈值 {PAN_IMBALANCE_THRESHOLD}）")
+    if imbalance < PAN_IMBALANCE_THRESHOLD:
+        return 'both', 0.0
+    label = 'left' if left_energy > right_energy else 'right'
+    confidence = min(1.0, imbalance / PAN_IMBALANCE_THRESHOLD)
+    return label, confidence
+
+
 def detect_voice_channel(samples_2d, sr):
     """检测原音频人声偏向哪个声道，返回 ``(label, confidence)``。
 
@@ -76,24 +125,8 @@ def detect_voice_channel(samples_2d, sr):
 
         left_frames = _voice_band_frame_energies(left, sr)
         right_frames = _voice_band_frame_energies(right, sr)
-        if len(left_frames) < 3:
-            return 'both', 0.0
-
-        left_energy = float(left_frames.sum())
-        right_energy = float(right_frames.sum())
-        if left_energy + right_energy < 1e-10:
-            return 'both', 0.0
-
-        imbalance = abs(left_energy - right_energy) / (left_energy + right_energy)
-        logger.debug(
-            f"[人声检测] 左 {left_energy:.1f} / 右 {right_energy:.1f}，"
-            f"不平衡度 {imbalance:.3f}（阈值 {PAN_IMBALANCE_THRESHOLD}）")
-
-        if imbalance < PAN_IMBALANCE_THRESHOLD:
-            return 'both', 0.0
-        label = 'left' if left_energy > right_energy else 'right'
-        confidence = min(1.0, imbalance / PAN_IMBALANCE_THRESHOLD)
-        return label, confidence
+        return _decide_channel(float(left_frames.sum()), float(right_frames.sum()),
+                               len(left_frames))
     except Exception as e:
         logger.warning(f"[人声检测] 异常: {e}")
         return 'both', 0.0
@@ -278,22 +311,63 @@ def detect_angles_parallel(original_audio, audio_files, channel_map, max_workers
 
     min_segment_samples = int(2 * sr)  # 至少 2 秒才检测
     window_frames = int(10000 * sr / 1000)
+    frame_len, hop_len = _frame_params(sr)
+
+    def _window_verdict(start_frame, end_frame, profile_left, profile_right):
+        """在全局能量谱上取窗口区间求和并判定；profile 为 None 表示单声道。"""
+        if profile_left is None:
+            return 'both', 0.0
+        k0 = -((-start_frame) // hop_len)           # ceil(start_frame / hop)
+        k1 = (end_frame - frame_len) // hop_len     # 窗口内最后一个完整帧
+        n_frames = k1 - k0 + 1
+        if n_frames < 3:
+            return 'both', 0.0
+        left_energy = float(profile_left[k0:k1 + 1].sum())
+        right_energy = float(profile_right[k0:k1 + 1].sum())
+        return _decide_channel(left_energy, right_energy, n_frames)
+
+    def _window_verdict_legacy(start_frame, end_frame):
+        """旧逐窗口路径：窗口起点自锚切片后整窗 FFT（片段稀疏时更省）。"""
+        start_byte = start_frame * frame_bytes
+        end_byte = end_frame * frame_bytes
+        chunk = np.frombuffer(raw[start_byte:end_byte], dtype=dtype)
+        if channels == 2:
+            segment = chunk.reshape(-1, 2).astype(np.float32)
+        else:
+            segment = np.column_stack([chunk, chunk]).astype(np.float32)
+        return detect_voice_channel(segment, sr)
+
+    # P2-3 窗口复用：逐帧能量一次算完、窗口只做区间求和。片段稀疏时全局
+    # 谱反而更贵（谱长 ∝ 音频跨度，逐窗成本 ∝ 片段数），按帧数预算二选一，
+    # 两条路径共用 _decide_channel，结论一致。
+    profile_left = profile_right = None
+    use_profile = False
+    if channels != 1 and audio_files:
+        legacy_frames = len(audio_files) * max(1, (window_frames - frame_len) // hop_len + 1)
+        profile_frames = max(0, (total_frames - frame_len) // hop_len + 1)
+        use_profile = profile_frames < legacy_frames
+        if use_profile:
+            stereo = np.frombuffer(
+                raw[: total_frames * frame_bytes], dtype=dtype).reshape(-1, channels)
+            profile_left = _voice_band_energy_profile(stereo[:, 0], sr)
+            profile_right = _voice_band_energy_profile(stereo[:, 1], sr)
 
     def detect_one(audio_info):
         t_ms = audio_info["timestamp_ms"]
         start_frame = int(t_ms * sr / 1000)
         end_frame = min(start_frame + window_frames, total_frames)
         voice_channel, confidence = 'both', 0.0
-        if end_frame - start_frame >= min_segment_samples:
+        if channels == 1:
+            # 单声道 L≡R，判定恒为 both（旧路径整窗 FFT 后同样得 both，
+            # 这里直接短路，省掉全部计算）
+            pass
+        elif end_frame - start_frame >= min_segment_samples:
             # 仅对 10s 窗口转换（约几 MB），避免整段音频常驻为 float32 大数组
-            start_byte = start_frame * frame_bytes
-            end_byte = end_frame * frame_bytes
-            chunk = np.frombuffer(raw[start_byte:end_byte], dtype=dtype)
-            if channels == 2:
-                segment = chunk.reshape(-1, 2).astype(np.float32)
+            if use_profile:
+                voice_channel, confidence = _window_verdict(
+                    start_frame, end_frame, profile_left, profile_right)
             else:
-                segment = np.column_stack([chunk, chunk]).astype(np.float32)
-            voice_channel, confidence = detect_voice_channel(segment, sr)
+                voice_channel, confidence = _window_verdict_legacy(start_frame, end_frame)
         angle = channel_map.get(voice_channel, 180)
         return audio_info["filename"], voice_channel, angle, confidence
 
