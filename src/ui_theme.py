@@ -76,7 +76,9 @@ FONT_SECTION = 14   # 分区标题 px
 FONT_TITLE = 23     # 页面标题 px
 
 # ---------------------------------------------------------------- 尺寸
-SIDEBAR_WIDTH = 208          # 左侧导航栏
+SIDEBAR_WIDTH = 240          # 左侧导航栏（可拖拽，200–340）
+SIDEBAR_MIN_WIDTH = 200
+SIDEBAR_MAX_WIDTH = 340
 SIDEBAR_PADDING = 12
 CENTER_PADDING = (20, 18, 20, 12)   # 中央内容内边距 18–24
 CONTROL_SPACING = 7          # 控件间距 6–8
@@ -90,7 +92,7 @@ INPUT_PADDING = (8, 6)       # 输入框内边距 6×8
 SETTINGS_ROW_PADDING = (18, 14)  # 设置行内边距 18×14
 LIST_ROW_HEIGHT = 50         # 模型/音频列表行高基准（任务列表同）
 MODEL_ROW_HEIGHT = 66        # 设置页模型行高
-PROGRESS_HEIGHT = 3          # 进度条 3px
+PROGRESS_HEIGHT = 6          # 进度条 6px（3px 在 1080p 上几乎看不见）
 ICON_SIZE = 18               # 常规图标 18px 细线
 DEFAULT_WINDOW_SIZE = (1380, 900)
 MIN_WINDOW_SIZE = (1080, 720)
@@ -175,6 +177,14 @@ QLabel[role="title"] {{ font-size: {FONT_TITLE}px; color: {p['text']}; }}
 QLabel[role="section"] {{ font-size: {FONT_SECTION}px; color: {p['text']}; }}
 QLabel[role="muted"] {{ color: {p['text_label']}; font-size: {FONT_AUX}px; }}
 QLabel[role="secondary"] {{ color: {p['text_secondary']}; font-size: {FONT_AUX}px; }}
+QLabel[role="taskTitle"] {{ font-size: 20px; font-weight: 600; color: {p['text']}; }}
+QLabel#stepDot {{
+    color: {p['disabled_text']}; font-size: {FONT_AUX}px; padding: 0 2px;
+}}
+QLabel#stepDot[status="running"] {{ color: {p['accent']}; }}
+QLabel#stepDot[status="done"] {{ color: {p['ready']}; }}
+QLabel#stepDot[status="failed"] {{ color: {p['error']}; }}
+QLabel#stepDot[status="skipped"] {{ color: {p['text_secondary']}; }}
 QLabel[role="mono"] {{ font-family: {MONO_FAMILY}; font-size: {FONT_AUX}px; color: {p['text_secondary']}; }}
 QLabel[role="error"] {{ color: {p['error']}; font-size: {FONT_AUX}px; }}
 QLabel[role="success"] {{ color: {p['ready']}; font-size: {FONT_AUX}px; }}
@@ -247,10 +257,10 @@ QCheckBox::indicator:checked:disabled {{ background: {p['disabled_text']}; borde
 
 /* ---------- 进度条（3px 细条，文字外置） ---------- */
 QProgressBar {{
-    background: {p['selected']}; border: none; border-radius: 1px;
+    background: {p['selected']}; border: none; border-radius: 3px;
     height: {PROGRESS_HEIGHT}px; text-align: center; color: transparent;
 }}
-QProgressBar::chunk {{ background: {p['accent']}; border-radius: 1px; }}
+QProgressBar::chunk {{ background: {p['accent']}; border-radius: 3px; }}
 
 /* ---------- 滑块（分离度等连续参数） ---------- */
 /* 细槽 + 圆形白柄：与整体"细线条"语言一致，不用 Fusion 默认的粗槽 */
@@ -311,6 +321,20 @@ QTextEdit#logView {{
     background: {p['bg']}; border: 1px solid {p['border']};
     border-radius: {RADIUS_CARD}px; padding: 8px;
 }}
+/* 日志抽屉：贴底、与上方滚动区用一条线分开；折叠时只留标题行 */
+QWidget#logDrawer {{
+    background: {p['bg']}; border-top: 1px solid {p['border']};
+}}
+QPushButton#logToggle {{ padding: 3px 8px; font-size: {FONT_AUX}px; }}
+/* 批量结果条：失败数一眼可见，带"重跑失败项" */
+QWidget#resultBar {{
+    background: #faf2f0; border: 1px solid #ecd7d0;
+    border-radius: {RADIUS_CARD}px;
+}}
+QWidget#resultBar[state="success"] {{
+    background: {p['ready_bg']}; border: 1px solid {p['ready_border']};
+}}
+QLineEdit#taskSearch {{ background: {p['bg']}; padding: 4px 8px; }}
 
 /* ---------- 设置分组容器（白底、细边框、13px 圆角、行间细线） ---------- */
 QWidget#settingsGroup {{

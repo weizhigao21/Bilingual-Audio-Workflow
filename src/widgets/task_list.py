@@ -286,6 +286,8 @@ class TaskListWidget(QTreeWidget):
         self._folder_items = {}
         self._task_items = {}
         self._task_objects = {}
+        self._filter_text = ""
+        self._failed_only = False
 
     def drawBranches(self, painter, rect, index):
         """禁用原生分支绘制：导引线与展开箭头由 TaskRowDelegate 统一绘制。
@@ -529,16 +531,19 @@ class TaskListWidget(QTreeWidget):
         ]
 
     def _task_subtitle(self, task: TaskInfo) -> str:
-        """第二行：仅状态词，不放步骤号。
+        """第二行：状态词；失败时直接写明是第几步失败。
 
-        208px 栏宽下第二行可用宽度实测为 95/81/67px（层级 0/1/2，
-        indentation=14，右侧为进度预留 48px）。"进行中 · 步骤2" 实测
-        108px、"失败·步骤2" 72px，均超过最深层 67px 会被省略号截断；
-        而层级更深的目录下任务还会更窄。因此这里只留状态词（最宽
-        "等待中/进行中/已完成/已跳过" 36px），定位到的步骤与三步标记
-        统一放进悬停提示（见 _update_item_text / _step_marks）。
+        208px 栏宽下第二行可用宽度实测为 95/81/67px（层级 0/1/2）。
+        侧栏改为可拖（默认 240px）后，"步骤2失败"（60px）在第二层也能
+        完整显示。失败定位不再只藏在 tooltip 里——批量跑完最需要一眼
+        看出哪一步断了。
         """
-        return STATUS_TEXT.get(self._overall_status(task), "")
+        status = self._overall_status(task)
+        if status == STEP_FAILED:
+            for step in (1, 2, 3):
+                if task.step_status(step) == STEP_FAILED:
+                    return f"步骤{step}失败"
+        return STATUS_TEXT.get(status, "")
 
     @staticmethod
     def _error_hint(task: TaskInfo) -> str:
@@ -691,3 +696,70 @@ class TaskListWidget(QTreeWidget):
             # 主窗口根据文件类型分发：视频→新任务，字幕→跳过步骤1，wav/目录→跳过步骤2
             self.window().on_files_dropped(files)
         event.acceptProposedAction()
+
+    # ---------- 搜索过滤 ----------
+    def set_filter(self, text: str):
+        """按任务名 / 文件夹名 / 源路径过滤侧栏树，父节点随子节点保留。
+
+        过滤只影响显示，不改变选中与队列数据；清空后恢复全部并展开。
+        """
+        self._filter_text = (text or "").strip().lower()
+        self._apply_all_filters()
+
+    def set_failed_only(self, enabled: bool):
+        """只看失败任务：任一状态为 failed 才算，父目录随子节点保留。"""
+        self._failed_only = bool(enabled)
+        self._apply_all_filters()
+
+    def _apply_all_filters(self):
+        for index in range(self.topLevelItemCount()):
+            self._apply_filter(self.topLevelItem(index), force=False)
+        if self._filter_text or self._failed_only:
+            self.expandAll()
+        self.viewport().update()
+
+    @staticmethod
+    def _task_failed(task) -> bool:
+        return any(task.step_status(step) == STEP_FAILED for step in (1, 2, 3))
+
+    def _apply_filter(self, item, force: bool) -> bool:
+        kind = item.data(0, self.ROLE_KIND)
+        name = (item.data(0, self.ROLE_NAME) or "").lower()
+        text_match = bool(self._filter_text) and self._filter_text in name
+        if kind == "task":
+            task = self._task_objects.get(item.data(0, self.ROLE_ID))
+            text_ok = not self._filter_text or text_match
+            if task and self._filter_text in (task.source_path or "").lower():
+                text_ok = True
+            failed_ok = not self._failed_only or (
+                task is not None and self._task_failed(task))
+            own = text_ok and failed_ok
+        else:
+            own = bool(text_match)
+        child_visible = False
+        for index in range(item.childCount()):
+            child_visible = self._apply_filter(
+                item.child(index), force or own) or child_visible
+        if not self._filter_text and not self._failed_only:
+            visible = True
+        elif force and not self._failed_only:
+            # 搜索命中父目录时展开全部子项；失败筛选下仍只保留失败子项
+            visible = True
+        else:
+            visible = own or child_visible
+        item.setHidden(not visible)
+        return visible
+
+    def visible_task_count(self) -> int:
+        count = 0
+        for index in range(self.topLevelItemCount()):
+            count += self._count_visible_tasks(self.topLevelItem(index))
+        return count
+
+    def _count_visible_tasks(self, item) -> int:
+        if item.isHidden():
+            return 0
+        if item.data(0, self.ROLE_KIND) == "task":
+            return 1
+        return sum(self._count_visible_tasks(item.child(i))
+                   for i in range(item.childCount()))

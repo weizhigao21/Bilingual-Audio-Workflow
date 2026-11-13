@@ -4,6 +4,7 @@ import os
 import time
 
 from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QMessageBox
 
 from ..task_manager import (TaskInfo, TASK_PATH_FIELDS,
                             STEP_DONE, STEP_FAILED, STEP_SKIPPED)
@@ -110,6 +111,33 @@ class RenameMixin:
             return src_dir
         return import_folder or src_dir
 
+    def _confirm_rename(self, *folders) -> bool:
+        """首次重命名前确认一次；同一会话内记住选择。
+
+        最小测试宿主（无窗口属性）直接放行，避免在测试里弹模态框。
+        """
+        if not hasattr(self, "run_task_btn"):
+            return True
+        consent = getattr(self, "_rename_consent", None)
+        if consent is not None:
+            return consent
+        names = [os.path.basename(normalize_folder(f)) for f in folders if f]
+        sample = "、".join(names[:3])
+        if len(names) > 3:
+            sample += f" 等 {len(names)} 个文件夹"
+        reply = QMessageBox.question(
+            self, "重命名源文件夹？",
+            f"即将把 {sample} 重命名为「双语-原名」。\n\n"
+            "这会改动你自己磁盘上的文件夹名，任务路径会自动跟着更新。\n"
+            "如不需要，可在「配置 → 混音 → 输出选项」关闭该选项。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        consent = reply == QMessageBox.StandardButton.Yes
+        self._rename_consent = consent
+        if not consent:
+            self._append_log("[重命名] 已取消本次重命名（可在混音设置关闭该选项）")
+        return consent
+
     def _do_rename_source_folder(self, task: TaskInfo):
         source_dir = self._resolve_source_folder(task)
         if not source_dir or not os.path.isdir(source_dir):
@@ -124,6 +152,8 @@ class RenameMixin:
         # 已有前缀 / 伪目录（"."、盘符根）等一律跳过，避免无效重试
         dir_name = rename_target_name(source_dir)
         if not dir_name:
+            return
+        if not self._confirm_rename(source_dir):
             return
         parent = os.path.dirname(source_dir)
         new_name = f"双语-{dir_name}"
@@ -178,6 +208,8 @@ class RenameMixin:
                 folders_to_rename.setdefault(os.path.normcase(source_dir), source_dir)
 
             if not folders_to_rename:
+                return
+            if not self._confirm_rename(*folders_to_rename.values()):
                 return
 
             any_failed = False

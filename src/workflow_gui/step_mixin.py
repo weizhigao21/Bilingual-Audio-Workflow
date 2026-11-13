@@ -45,6 +45,33 @@ class StepMixin:
         return False
 
     # ========== 步骤执行 ==========
+    def _start_scope_pipeline(self, tasks):
+        """任务级一键执行：按 1→2→3 流水线跑完当前作用域内剩余步骤。"""
+        steps = [1, 2, 3]
+        need_subtitle = [t for t in tasks
+                         if t.step_status(1) not in (STEP_DONE, STEP_SKIPPED)]
+        if need_subtitle and not self.config.is_configured():
+            QMessageBox.warning(
+                self, "字幕提取不可用",
+                "未配置有效的字幕提取程序路径，无法自动提取字幕。\n\n"
+                "请先在「配置 → 字幕提取」补充路径；或为任务添加字幕后再执行，"
+                "此时会自动跳过步骤 1。")
+            return
+        if not self._check_subtitles_available(tasks, steps):
+            return
+        from ..steps.batch_executor import BatchExecutor
+        self._tts_total = 0
+        for panel in self.step_panels.values():
+            panel.set_progress(0)
+            panel.set_detail("")
+        self._batch_executor = BatchExecutor(
+            list(tasks), steps, self.config, order="pipeline", parent=self)
+        self._connect_batch_signals()
+        self._append_log(
+            f"[执行] 开始: {len(tasks)} 个任务 · 步骤 1→2→3（已完成步骤自动跳过）")
+        self._refresh_run_buttons()
+        self._batch_executor.start()
+
     def _on_start_step(self, step: int):
         if self._batch_executor or any(self._workers.values()):
             QMessageBox.warning(self, "提示", "已有任务正在运行，请先停止。")
@@ -115,11 +142,11 @@ class StepMixin:
         self.step_panels[step].set_running(True)
         self.step_panels[step].set_status(STEP_RUNNING)
         # 启动前重置该步骤进度条（TTS 的 total 信号会随后调整上限）
-        self.step_panels[step].progress.setRange(0, 100)
-        self.step_panels[step].progress.setValue(0)
+        self.step_panels[step].set_progress(0)
         self.step_panels[step].set_detail("")
         self.task_queue.update_task(task)
         self._refresh_step_panels(task)
+        self._refresh_run_buttons()
         worker.start()
 
     def _on_stop_step(self, step: int):
@@ -160,22 +187,18 @@ class StepMixin:
         self._tts_total = 0  # 组执行时进度为 0-100 百分比，重置片段总数记录
         # 重置三个步骤进度条，避免残留上次运行的值
         for p in self.step_panels.values():
-            p.progress.setRange(0, 100)
-            p.progress.setValue(0)
+            p.set_progress(0)
             p.set_detail("")
         self._batch_executor = BatchExecutor(
             list(group.tasks), [step], self.config,
             order="by_step" if step == 1 else "by_task", parent=self
         )
         self._connect_batch_signals()
-        self.batch_btn.setEnabled(False)
-        self.batch_stop_btn.setEnabled(True)
-        for panel in self.step_panels.values():
-            panel.start_btn.setEnabled(False)
         self._append_log(
             f"[文件夹] 开始执行: 「{group.group_name}」步骤{step} "
             f"({len(group.tasks)} 个任务)"
         )
+        self._refresh_run_buttons()
         self._batch_executor.start()
 
     def _on_tts_total(self, total: int):
@@ -193,8 +216,7 @@ class StepMixin:
             if not self.task_queue.current or self.task_queue.current.task_id != task_id:
                 return
         panel = self.step_panels[step]
-        panel.progress.setRange(0, 100)
-        panel.progress.setValue(max(0, min(100, value)))
+        panel.set_progress(max(0, min(100, value)))
 
     def _on_step_status(self, step: int, text: str, task_id=None):
         """步骤实时状态显示在进度条下方，进度条只保留百分比。"""
@@ -219,7 +241,7 @@ class StepMixin:
         if success:
             self._append_log(f"[步骤{step}] 完成: {msg}")
             # 文件夹导入且混音完成后，重命名源文件夹添加"双语-"前缀
-            if step == 3 and task.from_folder and self.config.mixer_cfg.get("folder_prefix", True):
+            if step == 3 and task.from_folder and self.config.mixer_cfg.get("folder_prefix", False):
                 self._rename_source_folder(task)
         else:
             self._append_log(f"[步骤{step}] {'已停止' if cancelled else '失败'}: {msg}")
@@ -236,6 +258,7 @@ class StepMixin:
             self._refresh_step_panels(self.task_queue.current)
         elif self._current_group:
             self._show_group_summary(self._current_group)
+        self._refresh_run_buttons()
         if step == 3:
             from ..steps.audio_utils import clear_mix_cache
             clear_mix_cache()

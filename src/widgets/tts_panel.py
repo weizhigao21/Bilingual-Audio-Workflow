@@ -114,11 +114,11 @@ class TTSConfigPanel(QWidget):
         self.local_voice_picker = VoicePicker(self)
         self.api_group.add_widget_row(self.local_voice_picker)
 
-        # 用 QStackedWidget 切换 edge/api 面板，避免窗口被撑大后不缩小
-        self.config_stack = QStackedWidget()
-        self.config_stack.addWidget(self.edge_group)   # index 0 = edge
-        self.config_stack.addWidget(self.api_group)    # index 1 = api
-        layout.addWidget(self.config_stack)
+        # Edge/API 两组直接加入布局并按模式显隐。旧实现用 QStackedWidget，
+        # 其 sizeHint 取所有页的最大值，会把 Edge 卡硬撑到 API 卡的高度
+        # （实测标题 74px vs sizeHint 14px），窗口再大也只留一片空白。
+        layout.addWidget(self.edge_group)
+        layout.addWidget(self.api_group)
 
         # 缓存信息 + 清除按钮
         cache_row = QHBoxLayout()
@@ -133,6 +133,11 @@ class TTSConfigPanel(QWidget):
         cache_widget.setLayout(cache_row)
         layout.addWidget(cache_widget)
         layout.addStretch(1)
+
+    def _show_mode_group(self, index: int):
+        """只显示当前模式的分组，另一组隐藏（不占高度）。"""
+        self.edge_group.setVisible(index == 0)
+        self.api_group.setVisible(index == 1)
 
     def _load_values(self):
         cfg = self.config.tts_cfg
@@ -162,7 +167,7 @@ class TTSConfigPanel(QWidget):
             self.multi_api_check.setChecked(cfg.get("use_multi_api", False))
             self.bulk_check.setChecked(cfg.get("use_bulk_api", True))
             # 显示对应面板（不触发 _save）
-            self.config_stack.setCurrentIndex(0 if mode == "edge" else 1)
+            self._show_mode_group(0 if mode == "edge" else 1)
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -192,7 +197,7 @@ class TTSConfigPanel(QWidget):
         self.local_voice_picker.sync_from_config()
 
     def _on_mode_changed(self, mode):
-        self.config_stack.setCurrentIndex(0 if mode == "edge" else 1)
+        self._show_mode_group(0 if mode == "edge" else 1)
         self._save()
 
     def _on_api_changed(self):

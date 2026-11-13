@@ -49,16 +49,21 @@ class OutputLinkTests(unittest.TestCase):
     def setUp(self):
         self.panel = StepPanel(3, "混音")
 
-    def test_output_row_has_folder_and_file_links(self):
+    def test_output_row_shows_filename_and_action_buttons(self):
         self.panel.set_output("C:/work/out.mp4", "成品")
         text = self.panel.output_label.text()
-        self.assertIn("打开文件夹", text)
-        self.assertIn('href="folder:', text)
-        self.assertIn('href="file:///', text)
+        self.assertEqual(text, "成品：out.mp4")
+        self.assertNotIn("href", text)
+        self.assertNotIn("打开文件夹", text, "链接文案应改为独立按钮")
+        self.assertFalse(self.panel.open_btn.isHidden())
+        self.assertFalse(self.panel.reveal_btn.isHidden())
+        self.assertIn("C:/work/out.mp4", self.panel.output_label.toolTip())
 
-    def test_placeholder_has_no_link(self):
+    def test_placeholder_has_no_action_buttons(self):
         self.panel.set_output("")
-        self.assertNotIn("href", self.panel.output_label.text())
+        self.assertEqual(self.panel.output_label.text(), "成品：尚未生成")
+        self.assertTrue(self.panel.open_btn.isHidden())
+        self.assertTrue(self.panel.reveal_btn.isHidden())
 
     def test_folder_link_invokes_explorer_select(self):
         calls = []
@@ -76,12 +81,13 @@ class OutputLinkTests(unittest.TestCase):
             self.panel._reveal_in_explorer("C:/work/out.mp4")
         startfile.assert_called_once()
 
-    def test_link_dispatch_routes_correctly(self):
+    def test_action_buttons_route_to_open_and_reveal(self):
+        self.panel.set_output("C:/work/out.mp4", "成品")
         with patch.object(StepPanel, "_reveal_in_explorer") as reveal, \
              patch("src.widgets.step_panel.QDesktopServices.openUrl") as open_url:
-            self.panel._on_output_link("folder:C:/work/out.mp4")
+            self.panel.reveal_btn.click()
             reveal.assert_called_once_with("C:/work/out.mp4")
-            self.panel._on_output_link("file:///C:/work/out.mp4")
+            self.panel.open_btn.click()
             open_url.assert_called_once()
 
 
@@ -113,14 +119,16 @@ class DisabledReasonTests(unittest.TestCase):
         self.host._refresh_step_panels(task)
         btn = self.host.step_panels[2].start_btn
         self.assertFalse(btn.isEnabled())
-        self.assertIn("步骤 1", btn.toolTip())
+        self.assertTrue(btn.isHidden(), "未就绪时不再显示灰色假按钮")
+        self.assertIn("步骤 1", self.host.step_panels[2].summary_label.text())
 
     def test_step3_start_disabled_explains_prerequisite(self):
         task = self._add_task()
         self.host._refresh_step_panels(task)
         btn = self.host.step_panels[3].start_btn
         self.assertFalse(btn.isEnabled())
-        self.assertIn("步骤 2", btn.toolTip())
+        self.assertTrue(btn.isHidden())
+        self.assertIn("步骤 2", self.host.step_panels[3].summary_label.text())
 
     def test_enabled_button_restores_default_tooltip(self):
         task = self._add_task()
@@ -138,7 +146,7 @@ class DisabledReasonTests(unittest.TestCase):
         self.host._refresh_step_panels(task)
         btn = self.host.step_panels[1].stop_btn
         self.assertFalse(btn.isEnabled())
-        self.assertIn("没有正在运行", btn.toolTip())
+        self.assertTrue(btn.isHidden(), "空闲时不显示无意义的「停止」")
 
 
 if __name__ == "__main__":

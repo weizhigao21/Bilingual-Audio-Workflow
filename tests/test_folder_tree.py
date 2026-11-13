@@ -128,6 +128,44 @@ class FolderTreeTests(unittest.TestCase):
         self.assertIsNone(window._current_group)
         self.assertEqual(window.current_task_label.text(), "未选择任务")
 
+    def test_removing_group_clears_header_and_queue_count(self):
+        """回归：移除文件夹组后，页头不能继续显示这个「幽灵组」。"""
+        for name in ("a.mp3", "b.mp3"):
+            (self.media_root / name).write_bytes(b"\x00")
+        cfg = SimpleNamespace(
+            workspace_dir=str(self.root / "fresh-workspace"),
+            tts_cfg={}, mixer_cfg={"folder_prefix": False}, whisper_cfg={},
+            config={"workspace_dir": str(self.root / "fresh-workspace"),
+                    "tts": {}, "mixer": {"folder_prefix": False},
+                    "whisper": {}, "setup_completed": True},
+            save=lambda: None, needs_setup=lambda: False,
+            is_configured=lambda: True,
+        )
+        window = WorkflowMainWindow(cfg)
+        self.addCleanup(window.deleteLater)
+        window.resize(1100, 760)
+        window.show()
+        group = window.task_queue.create_group(str(self.media_root))
+        task_ids = [window.task_queue.add_task(
+            str(self.media_root / name), group_id=group.group_id).task_id
+            for name in ("a.mp3", "b.mp3")]
+        self.assertEqual(len(task_ids), 2)
+        window._on_group_selected(group.group_id)
+        for _ in range(3):
+            self.app.processEvents()
+        self.assertIn("2 个任务", window.scope_label.text())
+
+        window.task_queue.remove_group(group.group_id)
+        for _ in range(3):
+            self.app.processEvents()
+        self.assertIsNone(window._current_group)
+        self.assertIsNone(window._selected_folder)
+        self.assertEqual(window.queue_count_label.text(), "0 项")
+        self.assertEqual(window.current_task_label.text(), "未选择任务")
+        self.assertTrue(window.step_panels[1].isHidden(),
+                        "移除组后步骤卡应回到空态，而不是留在幽灵组")
+        self.assertFalse(window.run_task_btn.isEnabled())
+
     def test_group_subtitles_use_batch_mode(self):
         config = SimpleNamespace(workspace_dir=str(self.root / "batch-workspace"),
                                  tts_cfg={}, whisper_cfg={"enable_batching": False},

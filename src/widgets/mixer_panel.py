@@ -89,19 +89,19 @@ class MixerConfigPanel(QWidget):
         for b in ("128k", "192k", "256k", "320k"):
             self.bitrate_combo.addItem(b, b)
         self.bitrate_combo.currentIndexChanged.connect(self._on_quality_param_changed)
-        export.add_row("比特率", "仅自定义质量可用", self.bitrate_combo)
+        self._bitrate_row = export.add_row("比特率", "仅自定义质量可用", self.bitrate_combo)
 
         self.sr_combo = QComboBox()
         self.sr_combo.addItem("44100 Hz", 44100)
         self.sr_combo.addItem("48000 Hz", 48000)
         self.sr_combo.currentIndexChanged.connect(self._on_quality_param_changed)
-        export.add_row("采样率", "", self.sr_combo)
+        self._sr_row = export.add_row("采样率", "", self.sr_combo)
 
         self.channels_combo = QComboBox()
         self.channels_combo.addItem("立体声（2 声道）", 2)
         self.channels_combo.addItem("单声道（1 声道）", 1)
         self.channels_combo.currentIndexChanged.connect(self._on_quality_param_changed)
-        export.add_row("声道", "", self.channels_combo)
+        self._channels_row = export.add_row("声道", "", self.channels_combo)
 
         self.depth_combo = QComboBox()
         for d in (16, 24, 32):
@@ -195,7 +195,8 @@ class MixerConfigPanel(QWidget):
         self.suffix_check.toggled.connect(self._save)
         output.add_widget_row(self.suffix_check)
 
-        self.folder_prefix_check = QCheckBox("文件夹导入混音后重命名源文件夹（添加\"双语-\"前缀）")
+        self.folder_prefix_check = QCheckBox(
+            "文件夹导入混音后重命名源文件夹（添加\"双语-\"前缀，执行前会再确认）")
         self.folder_prefix_check.toggled.connect(self._save)
         output.add_widget_row(self.folder_prefix_check)
 
@@ -251,7 +252,7 @@ class MixerConfigPanel(QWidget):
         layout.addStretch(1)
 
     def _on_preset_changed(self):
-        """档位预设切换：联动参数控件并锁定/解锁。"""
+        """档位预设切换：联动参数控件；预设下隐藏三个参数行而非灰显。"""
         preset = self.preset_combo.currentData()
         if preset in self.PRESET_PARAMS:
             br, sr, ch = self.PRESET_PARAMS[preset]
@@ -263,14 +264,19 @@ class MixerConfigPanel(QWidget):
                     w.blockSignals(True)
                     w.setCurrentIndex(idx)
                     w.blockSignals(False)
-            self.bitrate_combo.setEnabled(False)
-            self.sr_combo.setEnabled(False)
-            self.channels_combo.setEnabled(False)
-        else:
-            self.bitrate_combo.setEnabled(True)
-            self.sr_combo.setEnabled(True)
-            self.channels_combo.setEnabled(True)
+        is_custom = preset == "custom"
+        for w in (self.bitrate_combo, self.sr_combo, self.channels_combo):
+            w.setEnabled(is_custom)
+        self._set_quality_rows_visible(is_custom)
         self._save()
+
+    def _set_quality_rows_visible(self, visible: bool):
+        """预设已决定参数值时，三行参数不再占据设置页高度。"""
+        for row in (getattr(self, "_bitrate_row", None),
+                    getattr(self, "_sr_row", None),
+                    getattr(self, "_channels_row", None)):
+            if row is not None:
+                row.setVisible(visible)
 
     def _on_quality_param_changed(self):
         """手动修改任意参数后，档位自动切换为"自定义"。"""
@@ -281,9 +287,9 @@ class MixerConfigPanel(QWidget):
                 self.preset_combo.blockSignals(True)
                 self.preset_combo.setCurrentIndex(idx)
                 self.preset_combo.blockSignals(False)
-            self.bitrate_combo.setEnabled(True)
-            self.sr_combo.setEnabled(True)
-            self.channels_combo.setEnabled(True)
+        for w in (self.bitrate_combo, self.sr_combo, self.channels_combo):
+            w.setEnabled(True)
+        self._set_quality_rows_visible(True)
         self._save()
 
     def _refresh_separation_readout(self, value: int):
@@ -347,6 +353,7 @@ class MixerConfigPanel(QWidget):
             self.bitrate_combo.setEnabled(is_custom)
             self.sr_combo.setEnabled(is_custom)
             self.channels_combo.setEnabled(is_custom)
+            self._set_quality_rows_visible(is_custom)
             # 音量
             self.volume_spin.setValue(cfg.get("volume_db", 0.0))
             # 自动音量
@@ -367,7 +374,7 @@ class MixerConfigPanel(QWidget):
             self.content_align_check.setChecked(cfg.get("content_alignment", False))
             self.resample_check.setChecked(cfg.get("high_quality_resample", True))
             self.suffix_check.setChecked(cfg.get("add_suffix", True))
-            self.folder_prefix_check.setChecked(cfg.get("folder_prefix", True))
+            self.folder_prefix_check.setChecked(cfg.get("folder_prefix", False))
             self.output_prefix_check.setChecked(cfg.get("output_folder_prefix", False))
             self.skip_check.setChecked(cfg.get("skip_existing", True))
             self.metadata_check.setChecked(cfg.get("metadata_enabled", True))

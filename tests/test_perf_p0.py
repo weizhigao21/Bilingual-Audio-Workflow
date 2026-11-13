@@ -206,9 +206,13 @@ class SourceGuardTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         source = (root / "src" / "workflow_gui" / "window.py").read_text(
             encoding="utf-8")
-        block = source.split("def _append_log")[1].split("\n    def ")[0]
+        # 格式对象按级别缓存（日志抽屉的级别筛选会反复重建文本）
+        block = source.split("def _insert_log_line")[1].split("\n    def ")[0]
         self.assertIn("LOG_COLORS[level]", block)
         self.assertIn("_log_formats", block)
+        # _append_log 只做分级与入库，不再重复创建 QTextCharFormat
+        append_block = source.split("def _append_log")[1].split("\n    def ")[0]
+        self.assertNotIn("QTextCharFormat(", append_block)
 
     def test_tts_worker_uses_throttle(self):
         root = Path(__file__).resolve().parents[1]

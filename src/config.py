@@ -112,7 +112,9 @@ DEFAULT_CONFIG = {
         "thread_count": 4,
         "streaming_threshold_minutes": 20,
         "enable_batch_parallel": True,
-        "folder_prefix": True,
+        # 默认关闭：重命名用户源文件夹是破坏性副作用，首次使用应在设置里
+        # 显式勾选；开启后运行时还会再确认一次。
+        "folder_prefix": False,
         # 声道角度：新版为"分离度（度数 0–90）+ 居中偏置"两个语义参数
         # （panning.py），旧的 channel_map 三角度仅在两个新键都缺失时迁移读取
         "channel_separation": 45,

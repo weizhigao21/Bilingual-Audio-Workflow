@@ -10,7 +10,7 @@
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog
+    QFileDialog, QSizePolicy
 )
 
 from ..ui_theme import StyledWidget
@@ -49,6 +49,11 @@ class SettingsGroup(StyledWidget):
         super().__init__(parent)
         self.setObjectName("settingsGroup")
         self.setProperty("card", "true")
+        # 纵向 Maximum：设置卡按内容高度排布，不被 QStackedWidget 拉高。
+        # 旧实现继承默认 Preferred，卡片会被拉伸，卡片内 QLabel 垂直居中，
+        # 标题行被撑到 74px（sizeHint 仅 14px）。
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)

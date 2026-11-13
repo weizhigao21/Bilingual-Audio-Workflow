@@ -130,6 +130,65 @@ class ToolbarMixin:
         """
         return find_matching_subtitle(media_path)
 
+    def _can_prompt(self) -> bool:
+        """最小测试宿主没有主按钮，不弹模态框；真实窗口才询问。"""
+        return getattr(self, "run_task_btn", None) is not None
+
+    def _ask_subtitle_mismatch(self, task, subtitle_path: str) -> bool:
+        """字幕文件名与任务名不一致时，默认「不应用」。"""
+        if not self._can_prompt():
+            return True
+        reply = QMessageBox.question(
+            self, "字幕文件名不一致",
+            f"字幕「{os.path.basename(subtitle_path)}」与当前任务"
+            f"「{task.source_name}」的文件名不一致。\n\n仍要应用到当前任务吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _ask_wav_action(self, task, mix_dir: str) -> str:
+        """一个 .wav 拖入可能是配音目录，也可能是新素材：让用户选一次。"""
+        if not self._can_prompt():
+            return ("mix" if task.step2_status not in (STEP_DONE, STEP_RUNNING)
+                    else "cancel")
+        box = QMessageBox(self)
+        box.setWindowTitle("拖入的音频怎么处理")
+        box.setText(
+            f"检测到音频「{os.path.basename(mix_dir)}」目录下的 wav 文件。\n"
+            f"要作为当前任务「{task.source_name}」的配音目录，"
+            "还是新建任务？")
+        box.setInformativeText(
+            "配音目录：跳过步骤 2，直接用这些 wav 合成；\n"
+            "新建任务：把 wav 当作新的源音频。")
+        mix_btn = None
+        if task.step2_status not in (STEP_DONE, STEP_RUNNING):
+            mix_btn = box.addButton(
+                f"作为配音目录添加到「{task.source_name}」",
+                QMessageBox.ButtonRole.AcceptRole)
+        new_btn = box.addButton("新建任务", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if mix_btn is not None and clicked is mix_btn:
+            return "mix"
+        if clicked is new_btn:
+            return "new"
+        return "cancel"
+
+    def _create_tasks_from_paths(self, paths, group_id: str):
+        for path in paths:
+            sub_path = self._find_matching_subtitle(path)
+            task = self.task_queue.add_task(path, subtitle_path=sub_path,
+                                            group_id=group_id)
+            self._append_log(f"[任务] 添加: {task.source_name}")
+            if group_id:
+                self._append_log(
+                    f"[任务] 已加入文件夹组: {self._current_group.group_name}")
+            if sub_path:
+                self._append_log(
+                    f"[任务] 自动识别字幕: {os.path.basename(sub_path)} (跳过步骤1)")
+
     def on_files_dropped(self, files):
         """拖拽或选择文件后调用，根据文件类型分发。"""
         video_files = []
@@ -153,47 +212,44 @@ class ToolbarMixin:
                 else:
                     self._append_log(f"[拖拽] 跳过不支持的文件: {path}")
 
+        # 先把「落到哪里」说清楚，避免同一动作三种结果却没有任何提示
+        dest = (f"文件夹组「{self._current_group.group_name}」"
+                if self._current_group else "新建任务")
+        self._append_log(f"[拖拽] 落点：{dest}；{len(files)} 个文件")
+        if files:
+            self._show_toast(f"拖入 {len(files)} 个文件 → {dest}")
+
         # 视频/音频文件 → 创建新任务（自动查找同名字幕文件）
         # 若当前选中文件夹组，则新任务加入该组
         group_id = self._current_group.group_id if self._current_group else ""
-        for path in video_files:
-            # 自动查找同目录下的同名字幕文件
-            sub_path = self._find_matching_subtitle(path)
-            task = self.task_queue.add_task(path, subtitle_path=sub_path,
-                                            group_id=group_id)
-            self._append_log(f"[任务] 添加: {task.source_name}")
-            if group_id:
-                self._append_log(
-                    f"[任务] 已加入文件夹组: {self._current_group.group_name}"
-                )
-            if sub_path:
-                self._append_log(f"[任务] 自动识别字幕: {os.path.basename(sub_path)} (跳过步骤1)")
+        if video_files:
+            self._create_tasks_from_paths(video_files, group_id)
 
-        # .wav 文件：有当前任务 → 添加为配音；无当前任务 → 创建新任务（视为源音频）
+        # .wav 文件：有当前任务时询问「配音目录 / 新建任务」，无当前任务则新建
         if wav_files:
             task = self.task_queue.current
-            if task and task.step2_status not in (STEP_DONE, STEP_RUNNING):
-                # 用第一个 wav 文件所在目录作为配音目录
+            if task:
                 mix_dir = os.path.dirname(wav_files[0])
-                self._apply_mix_folder_to_task(task.task_id, mix_dir)
-            elif not task:
-                # 没有当前任务，视为源音频文件
-                for path in wav_files:
-                    sub_path = self._find_matching_subtitle(path)
-                    task = self.task_queue.add_task(path, subtitle_path=sub_path,
-                                                    group_id=group_id)
-                    self._append_log(f"[任务] 添加: {task.source_name}")
-                    if sub_path:
-                        self._append_log(f"[任务] 自动识别字幕: {os.path.basename(sub_path)} (跳过步骤1)")
+                action = self._ask_wav_action(task, mix_dir)
+                if action == "mix":
+                    self._apply_mix_folder_to_task(task.task_id, mix_dir)
+                    self._show_toast(f"已添加配音目录：{os.path.basename(mix_dir)}")
+                elif action == "new":
+                    self._create_tasks_from_paths(wav_files, group_id)
+                    self._show_toast(f"已新建 {len(wav_files)} 个音频任务")
+                else:
+                    self._append_log("[拖拽] 已取消处理 .wav 文件")
             else:
-                self._append_log("[拖拽] 当前任务步骤2已完成，忽略 .wav 文件")
+                self._create_tasks_from_paths(wav_files, group_id)
+                self._show_toast(f"已新建 {len(wav_files)} 个音频任务")
 
-        # 字幕文件：按文件名匹配任务 source_name，无匹配才回退到当前任务
+        # 字幕文件：按文件名匹配任务 source_name；无匹配时回退到当前任务，
+        # 但文件名不一致必须先确认（默认不应用），避免一拖就覆盖错任务。
         if subtitle_files:
-            applied_any = False
+            applied_any = 0
+            declined = False
             for sub_path in subtitle_files:
                 sub_stem = os.path.splitext(os.path.basename(sub_path))[0]
-                # 在所有任务中找 source_name 与字幕文件名匹配的
                 matched_task = None
                 for t in self.task_queue.tasks:
                     if t.source_name == sub_stem:
@@ -204,28 +260,32 @@ class ToolbarMixin:
                     self._append_log(
                         f"[字幕] 按文件名匹配: {os.path.basename(sub_path)} → 任务 {matched_task.source_name}"
                     )
-                    applied_any = True
+                    applied_any += 1
                 else:
-                    # 无匹配，回退到当前任务（带警告）
                     task = self.task_queue.current
                     if task:
-                        # 检查当前任务是否已有字幕且不匹配
-                        if task.source_name != sub_stem:
+                        if (task.source_name != sub_stem
+                                and not self._ask_subtitle_mismatch(task, sub_path)):
                             self._append_log(
-                                f"[字幕] 警告: 字幕 {os.path.basename(sub_path)} 与当前任务 "
-                                f"{task.source_name} 文件名不匹配，仍已应用（如需修正请重新指定）"
-                            )
+                                f"[字幕] 已取消应用: {os.path.basename(sub_path)}"
+                                f"（与当前任务 {task.source_name} 文件名不一致）")
+                            declined = True
+                            continue
                         self._apply_subtitle_to_task(task.task_id, sub_path)
-                        applied_any = True
+                        applied_any += 1
                     else:
                         self._append_log(
                             f"[字幕] 无任务可应用: {os.path.basename(sub_path)}"
                         )
-            if not applied_any:
+            if applied_any:
+                self._show_toast(f"已应用 {applied_any} 个字幕文件")
+            elif not declined:
                 QMessageBox.warning(
                     self, "提示",
                     "字幕文件需要添加到已有任务。请先添加视频文件创建任务。"
                 )
+
+        # 配音目录：已由 _scan_folder_for_tasks 统一处理
 
         # 配音目录：已由 _scan_folder_for_tasks 统一处理
 

@@ -65,6 +65,34 @@ class TTSProfileTests(unittest.TestCase):
             self.assertTrue(task.force_remix)
             self.assertEqual(updates,[task])
 
+    def test_config_dialog_actually_wires_tts_change_handler(self):
+        """回归：处理器有实现、有单测，却从未被设置弹窗连接（线上失效）。"""
+        from PyQt6.QtWidgets import QDialog
+        from src.workflow_gui import config_mixin
+        host = SimpleNamespace(
+            config=SimpleNamespace(
+                tts_cfg={"edge_voice": "v1"}, mixer_cfg={}, whisper_cfg={},
+                config={"tts": {"edge_voice": "v1"}}, save=lambda: None),
+            task_queue=SimpleNamespace(tasks=[]),
+            _append_log=lambda msg: None,
+            _tts_affected_tasks=lambda: [],
+            _on_tts_config_changed=unittest.mock.MagicMock(),
+            _on_mixer_config_changed=lambda: None,
+            _on_whisper_config_changed=lambda: None,
+        )
+
+        class FakeDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def exec(self):
+                host.config.tts_cfg["edge_voice"] = "v2"
+                return QDialog.DialogCode.Accepted
+
+        with patch.object(config_mixin, "SettingsDialog", FakeDialog):
+            ConfigDialogMixin._open_settings(host, 2)
+        host._on_tts_config_changed.assert_called_once()
+
     def test_state_files_are_replaced_atomically(self):
         with tempfile.TemporaryDirectory() as folder:
             task = create_task(folder, str(Path(folder)/'source.wav'))

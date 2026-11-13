@@ -5,12 +5,13 @@
 混音），激活标签使用 2 px 深色底边，不填充大色块；一组相关设置放在同一
 白色容器内，行间细线分隔。三个步骤的配置面板内嵌其中，修改变更即自动保存。
 """
+import copy
 import os
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
-    QStackedWidget, QTabBar, QVBoxLayout, QWidget
+    QCheckBox, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QSpinBox, QStackedWidget, QTabBar, QVBoxLayout, QWidget
 )
 
 from ..config import SetupDialog, WorkflowConfig
@@ -108,7 +109,13 @@ class GeneralSettingsPage(QWidget):
             w.blockSignals(False)
         self._update_perf_preview()
 
+        self.perf_group = perf_group
+        self.perf_check = QCheckBox("显示高级设置（并发参数）")
+        self.perf_check.setToolTip("默认收起；需要调并发/线程数时再展开")
+        self.perf_check.toggled.connect(perf_group.setVisible)
+        layout.addWidget(self.perf_check)
         layout.addWidget(perf_group)
+        perf_group.setVisible(False)
         layout.addStretch(1)
         self._validate()
 
@@ -220,6 +227,12 @@ class SettingsDialog(QDialog):
         self.pages.setCurrentIndex(self.tab_bar.currentIndex())
 
         footer = QHBoxLayout()
+        line = QWidget()
+        line.setObjectName("headerRule")
+        line.setFixedHeight(1)
+        layout.addSpacing(8)
+        layout.addWidget(line)
+        layout.addSpacing(10)
         footer.addStretch(1)
         close_btn = QPushButton("完成")
         close_btn.setProperty("kind", "primary")
@@ -243,21 +256,73 @@ class ConfigDialogMixin:
     """配置对话框相关方法。"""
 
     def _on_config(self):
-        dialog = SettingsDialog(self.config, self, initial_tab=0)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._append_log("[配置] 已更新")
+        self._open_settings(0)
 
     def _on_open_tts_config(self):
-        """打开设置弹窗并定位到配音页。配置变更自动保存。"""
-        SettingsDialog(self.config, self, initial_tab=2).exec()
+        """打开设置弹窗并定位到配音页；关闭后提示配置对已有配音的影响。"""
+        self._open_settings(2)
 
     def _on_open_mixer_config(self):
-        """打开设置弹窗并定位到混音页。配置变更自动保存。"""
-        SettingsDialog(self.config, self, initial_tab=3).exec()
+        self._open_settings(3)
 
     def _on_open_whisper_config(self):
-        """打开设置弹窗并定位到字幕提取页。配置变更自动保存。"""
-        SettingsDialog(self.config, self, initial_tab=1).exec()
+        self._open_settings(1)
+
+    def _tts_affected_tasks(self):
+        """配置变化后需要重新配音的任务（自定义配音/未完成配音的不算）。"""
+        from ..steps.tts_profile import profile_matches
+        affected = []
+        for task in self.task_queue.tasks:
+            if task.custom_mix_folder:
+                continue
+            if task.step2_status not in (STEP_DONE, STEP_SKIPPED):
+                continue
+            if task.step2_output and not profile_matches(
+                    task.step2_output, self.config.tts_cfg):
+                affected.append(task)
+        return affected
+
+    def _open_settings(self, initial_tab: int):
+        """设置弹窗的统一入口：配音参数变了要先问，再重置已有配音。
+
+        旧实现里 `_on_tts_config_changed` 有实现、有单测，却从未 `.connect`，
+        改声音后任务仍显示"已完成"但成品是旧声音。这里显式接线，并把
+        「保留已有配音」作为默认选项，避免误清空已做好的成果。
+        """
+        before_tts = copy.deepcopy(self.config.tts_cfg)
+        dialog = SettingsDialog(self.config, self, initial_tab=initial_tab)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        tts_changed = before_tts != self.config.tts_cfg
+        if tts_changed:
+            affected = self._tts_affected_tasks()
+            if affected:
+                reply = QMessageBox.question(
+                    self, "配音配置已变化",
+                    f"有 {len(affected)} 个任务已生成配音，但当前声音/语速与"
+                    "成品不一致。\n\n"
+                    "「重新生成」：清空这些任务的配音与混音，下次执行时用新声音重做。\n"
+                    "「保留已有配音」：成品保持原样，仅后续任务使用新配置。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._on_tts_config_changed()
+                    self._append_log(
+                        f"[配音配置] 已标记 {len(affected)} 个任务需重新配音")
+                else:
+                    # 配置面板是即时保存的：不恢复就等于悄悄改了后续任务。
+                    # 用户选择"保留"时把 tts 段整体回滚，保证配置与成品一致。
+                    self.config.config["tts"] = before_tts
+                    try:
+                        self.config.save()
+                    except OSError as exc:
+                        self._append_log(f"[配置] 回滚保存失败: {exc}")
+                    self._append_log("[配音配置] 已保留现有配音，配置未变更")
+            else:
+                self._on_tts_config_changed()
+        self._on_mixer_config_changed()
+        self._on_whisper_config_changed()
+        if accepted:
+            self._append_log("[配置] 已更新")
 
     def _on_tts_config_changed(self):
         """配音配置变化时记录日志。"""

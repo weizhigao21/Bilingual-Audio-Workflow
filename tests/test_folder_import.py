@@ -125,6 +125,28 @@ class FolderImportTests(unittest.TestCase):
         self.assertIn("源文件相同", message)
         self.assertEqual(source.read_bytes(), before)
 
+    def test_dropped_subtitle_mismatch_requires_confirmation(self):
+        media = self.make("OP.mp3")
+        subtitle = self.make("other-name.lrc")
+        config = SimpleNamespace(
+            workspace_dir=str(Path(self.temp.name) / "tasks-mismatch"),
+            tts_cfg={}, mixer_cfg={"folder_prefix": False},
+            config={"workspace_dir": str(Path(self.temp.name) / "tasks-mismatch")},
+            save=lambda: None,
+        )
+        window = WorkflowMainWindow(config)
+        self.addCleanup(window.close)
+        task = window.task_queue.add_task(str(media))
+        window.task_queue.set_current(task.task_id)
+
+        with patch.object(window, "_ask_subtitle_mismatch", return_value=False):
+            window.on_files_dropped([str(subtitle)])
+        self.assertFalse(task.custom_subtitle, "用户拒绝后不得应用到当前任务")
+
+        with patch.object(window, "_ask_subtitle_mismatch", return_value=True):
+            window.on_files_dropped([str(subtitle)])
+        self.assertEqual(task.custom_subtitle, str(subtitle.resolve()))
+
     def test_folder_import_and_drop_do_not_open_preview(self):
         included = self.make("A/one.mp3")
         second = self.make("B/two.mp3")

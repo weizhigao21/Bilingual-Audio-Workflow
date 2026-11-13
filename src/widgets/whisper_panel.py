@@ -111,6 +111,8 @@ class WhisperConfigPanel(QWidget):
         layout.addWidget(vad)
 
         # 高级
+        self.advanced_check = QCheckBox("显示高级设置（批处理 / 覆盖）")
+        self.advanced_check.setToolTip("默认收起；需要改这些选项时再展开")
         advanced = SettingsGroup("高级")
         self.batch_check = QCheckBox("启用批处理（加速但占更多显存）")
         self.batch_check.toggled.connect(self._save)
@@ -118,7 +120,11 @@ class WhisperConfigPanel(QWidget):
         self.overwrite_check = QCheckBox("覆盖已有字幕文件")
         self.overwrite_check.toggled.connect(self._save)
         advanced.add_widget_row(self.overwrite_check)
+        self.advanced_group = advanced
+        self.advanced_check.toggled.connect(advanced.setVisible)
+        layout.addWidget(self.advanced_check)
         layout.addWidget(advanced)
+        advanced.setVisible(False)
         layout.addStretch(1)
 
     def _load_values(self):

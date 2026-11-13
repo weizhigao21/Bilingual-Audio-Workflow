@@ -28,8 +28,8 @@ from PyQt6.QtCore import QPoint, QPointF, QModelIndex, QTimer, Qt
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QScrollBar, QStyleOptionViewItem, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QScrollArea, QScrollBar, QStyleOptionViewItem, QTextEdit,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from PyQt6.QtTest import QTest
 
@@ -109,9 +109,9 @@ class ThemeConstantTests(unittest.TestCase):
         self.assertEqual((FONT_TITLE, FONT_SECTION, FONT_BODY, FONT_AUX),
                          (23, 14, 13, 12))
         self.assertEqual(FONT_FAMILY, "Microsoft YaHei")
-        self.assertEqual(SIDEBAR_WIDTH, 208)
+        self.assertEqual(SIDEBAR_WIDTH, 240)
         self.assertEqual(LIST_ROW_HEIGHT, 50)
-        self.assertEqual(PROGRESS_HEIGHT, 3)
+        self.assertEqual(PROGRESS_HEIGHT, 6)
         self.assertEqual((RADIUS_CONTROL, RADIUS_SETTINGS_CARD, RADIUS_DIALOG),
                          (6, 13, 14))
 
@@ -202,9 +202,15 @@ class ShellLayoutTests(unittest.TestCase):
         return found[0]
 
     def test_shell_regions_with_spec_widths(self):
-        # 宽度按 UI_STYLE.md 字面值断言：同时捕获"常量被改"与
-        # "控件没按常量布局"两类回归
-        self.assertEqual(self._region("sidebar").width(), 208)
+        # 侧栏可拖：默认宽度按常量，QSplitter 句柄会吃掉 1px
+        self.window.show()
+        for _ in range(3):
+            self.app.processEvents()
+        width = self._region("sidebar").width()
+        self.assertLessEqual(abs(width - SIDEBAR_WIDTH), 2,
+                             f"侧栏默认宽度应≈{SIDEBAR_WIDTH}px，实际 {width}")
+        self.assertGreaterEqual(width, 200)
+        self.assertLessEqual(width, 340)
         self.assertTrue(self._region("centerPane").width() > 0)
 
     def test_bottom_bar_removed(self):
@@ -244,9 +250,8 @@ class ShellLayoutTests(unittest.TestCase):
                     + "/subtitle.lrc"
         panel.set_output(long_path, "字幕")
         text = panel.output_label.text()
-        self.assertIn("…", text)
-        self.assertRegex(text, r"subtitle\.lrc</a>")
-        self.assertTrue(text.endswith("</a>"), "文件夹链接应缀在输出行末尾")
+        self.assertIn("subtitle.lrc", text)
+        self.assertNotIn("href", text, "输出行不再拼 RichText 链接")
         self.assertIn(long_path, panel.output_label.toolTip())
         panel.set_output("")
         # 输出行不再隐藏：显隐会让卡片高矮差一个行高，切换任务时中央区
@@ -277,7 +282,7 @@ class ShellLayoutTests(unittest.TestCase):
 
 
 class ToolbarEntryTests(unittest.TestCase):
-    """工具栏单行按钮（旧版形态）与条目级操作可用性。"""
+    """页头执行区（一个主按钮）与条目级操作可用性。"""
 
     @classmethod
     def setUpClass(cls):
@@ -292,17 +297,25 @@ class ToolbarEntryTests(unittest.TestCase):
         self.addCleanup(self.window.deleteLater)
         self.window.resize(1380, 900)
 
-    def test_toolbar_button_sequence(self):
-        buttons = self.window._build_toolbar_buttons()
-        texts = [b.text() for b in buttons if isinstance(b, QPushButton)]
-        # 导入类入口全部离开工具栏：添加媒体并入侧栏「＋ 添加素材」，
-        # 添加字幕/配音下沉到对应步骤卡
-        self.assertEqual(
-            texts, ["打开工作区", "配置", "批量执行", "停止批量"])
-        primary = [b for b in buttons
-                   if isinstance(b, QPushButton)
-                   and b.property("kind") == "primary"]
-        self.assertEqual(len(primary), 1, "工具栏主按钮应只有「批量执行」")
+    def test_header_has_one_primary_action(self):
+        # 全局唯一主按钮是「执行本任务」；批量降为文字按钮
+        self.assertEqual(self.window.run_task_btn.text(), "执行本任务")
+        self.assertEqual(self.window.run_task_btn.property("kind"), "primary")
+        self.assertEqual(self.window.batch_btn.text(), "批量执行…")
+        self.assertEqual(self.window.batch_btn.property("kind"), "text")
+        self.assertFalse(hasattr(self.window, "_build_toolbar_buttons"),
+                         "旧工具栏应已移除，避免两套并行入口")
+        # 低频入口在侧栏底部
+        sidebar_texts = [b.text() for b in
+                         self._sidebar().findChildren(QPushButton)]
+        self.assertIn("打开工作区", sidebar_texts)
+        self.assertIn("配置", sidebar_texts)
+        # 全窗口只能有一个黑色主按钮（侧栏「添加素材」也是主按钮，共 2 个）
+        primaries = [b for b in self.window.findChildren(QPushButton)
+                     if b.property("kind") == "primary"
+                     and b.isVisibleTo(self.window)]
+        self.assertEqual(len(primaries), 2,
+                         "可见主按钮应只剩「添加素材」与「执行本任务」")
 
     def test_add_media_entry_lives_in_sidebar_above_tree(self):
         """合并后的添加入口在侧栏、位于程序名之下、任务树之上。"""
@@ -349,12 +362,13 @@ class ToolbarEntryTests(unittest.TestCase):
         self.assertIn("＋ 添加配音", step2_texts)
         self.assertNotIn("＋ 添加字幕", step2_texts + step3_texts)
         self.assertNotIn("＋ 添加配音", step1_texts + step3_texts)
-        # 工具栏里不得再出现这两个入口
-        toolbar_texts = [b.text() for b in
-                         self.window._build_toolbar_buttons()
-                         if isinstance(b, QPushButton)]
-        self.assertNotIn("+ 添加字幕", toolbar_texts)
-        self.assertNotIn("+ 添加配音", toolbar_texts)
+        # 页头执行区里不得再出现这两个入口
+        self.assertNotIn("＋ 添加字幕",
+                         [self.window.run_task_btn.text(),
+                          self.window.batch_btn.text()])
+        self.assertNotIn("＋ 添加配音",
+                         [self.window.run_task_btn.text(),
+                          self.window.batch_btn.text()])
 
     def _sidebar(self):
         found = self.window.findChildren(QWidget, "sidebar")
@@ -391,11 +405,52 @@ class ToolbarEntryTests(unittest.TestCase):
                             f"缺少设置入口方法 {name}")
 
 
-class StepPanelOutputTests(unittest.TestCase):
-    """输出路径必须是可点击链接（RichText），且路径字符需 HTML 转义。
+class SidebarFilterTests(unittest.TestCase):
+    """侧栏失败筛选与清空入口。"""
 
-    PlainText 会把 <a href> 按纯文本裸显（截图事故：输出行直接露出
-    file:/// 原始 HTML），textFormat 回归到这里拦。
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.folder = TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.root = Path(self.folder.name)
+        from src.workflow_gui import WorkflowMainWindow
+        self.window = WorkflowMainWindow(_make_config(self.root))
+        self.addCleanup(self.window.deleteLater)
+        for name in ("ok.mp4", "bad.mp4"):
+            (self.root / name).write_bytes(b"\x00")
+        self.ok = self.window.task_queue.add_task(str(self.root / "ok.mp4"))
+        self.bad = self.window.task_queue.add_task(str(self.root / "bad.mp4"))
+        self.ok.set_step_status(1, STEP_DONE)
+        self.bad.set_step_status(1, STEP_DONE)
+        self.bad.set_step_status(2, STEP_FAILED)
+        self.window.task_queue.update_task(self.ok)
+        self.window.task_queue.update_task(self.bad)
+
+    def test_failed_only_filter_keeps_failed_tasks(self):
+        self.window.failed_only_check.setChecked(True)
+        for _ in range(3):
+            self.app.processEvents()
+        self.assertEqual(self.window.task_list.visible_task_count(), 1)
+        self.assertIn("1/2 项", self.window.queue_count_label.text())
+        self.assertTrue(self.window.task_list._task_items[
+            self.ok.task_id].isHidden())
+        self.assertFalse(self.window.task_list._task_items[
+            self.bad.task_id].isHidden())
+
+    def test_clear_queue_entry_exists_and_enabled(self):
+        self.assertTrue(self.window.clear_all_btn.isEnabled())
+        self.window.task_queue.clear_all()
+        self.assertFalse(self.window.clear_all_btn.isEnabled())
+
+
+class StepPanelOutputTests(unittest.TestCase):
+    """输出行只显示文件名，打开/定位是独立按钮。
+
+    早期实现把路径和「打开文件夹」拼成 RichText 链接，两段蓝色 URL
+    相邻，看起来像一条被截断的路径；这里守卫新的纯文本方案。
     """
 
     @classmethod
@@ -406,27 +461,22 @@ class StepPanelOutputTests(unittest.TestCase):
         self.panel = StepPanel(1, "字幕提取")
         self.addCleanup(self.panel.deleteLater)
 
-    def test_output_label_renders_rich_text_link(self):
+    def test_output_label_shows_filename_only(self):
         self.panel.set_output("C:/work/tasks/subtitle.lrc", "字幕")
         label = self.panel.output_label
-        self.assertEqual(label.textFormat(), Qt.TextFormat.RichText)
-        self.assertIn('<a href="file:///C:/work/tasks/subtitle.lrc">',
-                      label.text())
-        # P2-4 起链接自行分发（openExternalLinks 关闭）：打开文件与
-        # 「打开文件夹」定位都走 linkActivated，否则拦不到 explorer /select
-        self.assertFalse(label.openExternalLinks())
-        self.assertIn('href="folder:', label.text())
+        self.assertEqual(label.textFormat(), Qt.TextFormat.PlainText)
+        self.assertEqual(label.text(), "字幕：subtitle.lrc")
+        self.assertNotIn("href", label.text())
+        self.assertNotIn("打开文件夹", label.text())
+        self.assertFalse(self.panel.open_btn.isHidden())
+        self.assertFalse(self.panel.reveal_btn.isHidden())
 
-    def test_special_characters_are_escaped(self):
+    def test_special_characters_stay_literal_in_plain_text(self):
         path = "C:/a&b/<c>/d>e/sub&title.lrc"
         self.panel.set_output(path, "字幕")
         text = self.panel.output_label.text()
-        self.assertIn("&amp;", text)
-        self.assertIn("&lt;c&gt;", text)
-        self.assertNotIn("<c>", text)
-        self.assertIn("file:///C:/a&amp;b/&lt;c&gt;/d&gt;e/sub&amp;title.lrc",
-                      text)
-        # tooltip 保留原始路径（未转义）
+        self.assertEqual(text, "字幕：sub&title.lrc")
+        self.assertNotIn("&amp;", text)
         self.assertIn(path, self.panel.output_label.toolTip())
 
 
@@ -920,12 +970,12 @@ class SidebarSubtitleTests(unittest.TestCase):
         for done, total in ((0, 1), (5, 12), (9, 9), (12, 7), (99, 99)):
             self._assert_fits(TaskListWidget._count_subtitle(done, total))
 
-    def test_subtitle_is_the_bare_status_word(self):
-        # 第二行只承载状态词；"进行中 · 步骤2" 108px 会被截断
+    def test_subtitle_states_failed_step_explicitly(self):
+        # 失败时第二行直接写第几步失败（"步骤2失败" 60px，240px 侧栏下可完整显示）
         cases = [
             ({}, "等待中"),
             ({"step1": STEP_DONE, "step2": STEP_RUNNING}, "进行中"),
-            ({"step1": STEP_DONE, "step2": STEP_FAILED}, "失败"),
+            ({"step1": STEP_DONE, "step2": STEP_FAILED}, "步骤2失败"),
             ({"step1": STEP_DONE, "step2": STEP_DONE, "step3": STEP_DONE}, "已完成"),
             ({"step1": STEP_SKIPPED}, "等待中"),
         ]
@@ -1312,7 +1362,7 @@ class TreeConnectorTests(unittest.TestCase):
 
 
 class LogAreaLayoutTests(unittest.TestCase):
-    """日志区必须吃掉中央区剩余高度（截图反馈：卡片下手大片空白）。"""
+    """日志改为底部抽屉：默认折叠成一行，展开后吃掉剩余高度。"""
 
     @classmethod
     def setUpClass(cls):
@@ -1325,25 +1375,38 @@ class LogAreaLayoutTests(unittest.TestCase):
         self.window = WorkflowMainWindow(_make_config(Path(self.folder.name)))
         self.addCleanup(self.window.deleteLater)
         self.window.resize(1380, 900)
+        self.window.show()
+        for _ in range(5):
+            self.app.processEvents()
 
     def test_log_view_has_no_small_height_cap(self):
-        # 旧实现 max-height:220px，剩余高度就变成了卡片下方的空白
+        # 旧实现 max-height:220px，展开后仍会截断长日志
         self.assertGreaterEqual(
             self.window.log_view.maximumHeight(), 2000,
             "日志框被 max-height 截断，剩余高度会留成空白")
 
-    def test_log_card_takes_the_stretch(self):
+    def test_log_drawer_is_outside_scroll_and_collapsed_by_default(self):
         content = self.window.findChildren(QWidget, "centerScrollContent")
         self.assertEqual(len(content), 1)
-        layout = content[0].layout()
-        index = layout.count() - 1
-        self.assertIsNotNone(
-            layout.itemAt(index).widget(),
-            "中央内容末尾不应再挂伸缩空白项（空白会被留在最下方）")
-        self.assertEqual(layout.stretch(index), 1,
-                         "日志卡应拿到 1 权重以吸收剩余高度")
-        self.assertIs(layout.itemAt(index).widget(),
-                      self.window.log_view.parentWidget())
+        self.assertNotIn(self.window.log_view,
+                         content[0].findChildren(QTextEdit),
+                         "日志不应再占滚动内容的高度")
+        self.assertTrue(self.window.log_view.isHidden(),
+                        "默认应收起日志抽屉")
+        self.assertLess(self.window.log_drawer.height(), 80,
+                        "折叠时抽屉应只占标题行高度")
+
+    def test_expanding_log_drawer_gives_log_height(self):
+        self.window._set_log_expanded(True)
+        for _ in range(5):
+            self.app.processEvents()
+        self.assertTrue(self.window.log_view.isVisible())
+        self.assertGreaterEqual(self.window.log_view.height(), 150)
+
+    def test_error_log_auto_expands_drawer(self):
+        self.window._append_log("[测试] 执行失败: 示例错误")
+        self.assertTrue(self.window.log_view.isVisible(),
+                        "出错时日志抽屉应自动展开，而不是把失败藏在折叠区")
 
 
 class ElidedLabelTests(unittest.TestCase):
