@@ -457,6 +457,11 @@ class TaskListWidget(QTreeWidget):
                 if key[0] != group_id
             }
 
+    def select_task_item(self, task_id: str):
+        item = self._find_task_item(task_id)
+        if item:
+            self.setCurrentItem(item)
+
     def select_group_item(self, group_id: str):
         item = self._find_group_item(group_id)
         if item:

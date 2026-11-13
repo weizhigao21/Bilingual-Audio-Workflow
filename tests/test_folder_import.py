@@ -164,6 +164,25 @@ class FolderImportTests(unittest.TestCase):
             window.on_files_dropped([str(self.root)])
             self.assertEqual(len(window.task_queue.tasks), 2)
             message_box.assert_not_called()
+        # 导入结束后应停在文件夹组，而不是最后一个子任务
+        self.assertIsNotNone(window._current_group)
+        self.assertIsNone(window.task_queue.current)
+        self.assertEqual(window.current_task_label.text(),
+                         window._current_group.group_name)
+
+    def test_multi_file_import_clears_last_task_selection(self):
+        first = self.make("first.mp3")
+        second = self.make("second.mp3")
+        config = SimpleNamespace(
+            workspace_dir=str(Path(self.temp.name) / "tasks-multi"),
+            tts_cfg={}, mixer_cfg={"folder_prefix": False},
+        )
+        window = WorkflowMainWindow(config)
+        self.addCleanup(window.close)
+        window.on_files_dropped([str(first), str(second)])
+        self.assertEqual(len(window.task_queue.tasks), 2)
+        self.assertIsNone(window.task_queue.current)
+        self.assertTrue(window.batch_btn.isEnabled())
 
     def test_output_collision_auto_skips_duplicate_target(self):
         first = self.make("A/one.mp3")

@@ -118,6 +118,9 @@ class ToolbarMixin:
         self._append_log(
             f"[文件夹] 完成: 文件夹组「{group.group_name}」共 {len(group.tasks)} 个任务"
         )
+        # 导入结束时把选中项收回组节点：否则会停在最后一个子任务，
+        # 页头误显示“单个任务”，主按钮只会跑这一条。
+        self._restore_import_selection(list(group.tasks), group.group_id)
         self._show_toast(f"已导入文件夹「{group.group_name}」：{len(group.tasks)} 个任务")
 
     def _find_matching_subtitle(self, media_path: str) -> str:
@@ -177,10 +180,12 @@ class ToolbarMixin:
         return "cancel"
 
     def _create_tasks_from_paths(self, paths, group_id: str):
+        created = []
         for path in paths:
             sub_path = self._find_matching_subtitle(path)
             task = self.task_queue.add_task(path, subtitle_path=sub_path,
                                             group_id=group_id)
+            created.append(task)
             self._append_log(f"[任务] 添加: {task.source_name}")
             if group_id:
                 self._append_log(
@@ -188,6 +193,33 @@ class ToolbarMixin:
             if sub_path:
                 self._append_log(
                     f"[任务] 自动识别字幕: {os.path.basename(sub_path)} (跳过步骤1)")
+        self._restore_import_selection(created, group_id)
+
+    def _restore_import_selection(self, created, group_id: str):
+        """批量导入后不要停在“最后一个任务”。
+
+        每加一个任务 TreeWidget 都会自动选中它，批量导入结束时选中项
+        会变成最后一个，此时点主按钮很容易只跑这一条。这里统一收回：
+        有文件夹组就选组，单条就选该任务，多条散任务则清空选中，
+        让用户先明确选范围或直接走「批量执行…」。
+        """
+        if not created:
+            return
+        if group_id:
+            self.task_list.select_group_item(group_id)
+            return
+        if len(created) == 1:
+            task = created[0]
+            self.task_queue.set_current(task.task_id)
+            self.task_list.select_task_item(task.task_id)
+            return
+        self._current_group = None
+        self._selected_folder = None
+        self.task_queue.set_current(None)
+        self.task_list.setCurrentItem(None)
+        self._on_current_changed(None)
+        self._append_log(
+            f"[导入] 已加入 {len(created)} 个任务；未自动选中单条，请用「批量执行…」选择范围")
 
     def on_files_dropped(self, files):
         """拖拽或选择文件后调用，根据文件类型分发。"""
