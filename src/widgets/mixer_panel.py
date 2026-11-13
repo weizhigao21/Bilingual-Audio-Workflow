@@ -120,8 +120,8 @@ class MixerConfigPanel(QWidget):
         volume.add_row("配音音量", "在自动音量基础上的附加增益", self.volume_spin)
 
         self.auto_vol_combo = QComboBox()
-        self.auto_vol_combo.addItem("匹配原音频整体 RMS", "fixed")
-        self.auto_vol_combo.addItem("动态跟随原音频 RMS", "auto")
+        self.auto_vol_combo.addItem("匹配原音频人声 RMS", "fixed")
+        self.auto_vol_combo.addItem("跟随原音频人声 RMS", "auto")
         self.auto_vol_combo.addItem("仅使用配音音量增益", "off")
         self.auto_vol_combo.currentIndexChanged.connect(self._save)
         volume.add_row("音量模式", "", self.auto_vol_combo)

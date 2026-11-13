@@ -52,6 +52,10 @@ def profile_key(config):
             'apis': [_api_entry(a) for a in selected],
             'bulk': bool(config.get('use_bulk_api', True)),
         }
+    # 只在开启时并入签名：关闭/缺省时保持旧哈希不变，已有配音目录和缓存
+    # 不会因为新增这个开关而全部失效。
+    if config.get('filter_pure_number_lines', False):
+        relevant['filter_pure_number_lines'] = True
     data = json.dumps(relevant, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 

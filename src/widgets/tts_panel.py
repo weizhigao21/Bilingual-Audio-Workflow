@@ -47,6 +47,19 @@ class TTSConfigPanel(QWidget):
         mode_row.addWidget(self.mode_segment)
         layout.addLayout(mode_row)
 
+        # 字幕处理：Edge/API 两种模式共用，因此放在模式行之后、参数卡之前。
+        self.filter_number_check = QCheckBox(
+            "过滤纯数字字幕（整条只有中文/阿拉伯数字）")
+        self.filter_number_check.setToolTip(
+            "只跳过整条只有数字的字幕，例如“七”“2024”“3.5”；\n"
+            "“第3集”“2024年”“A4纸”这类含其他文字的句子原样保留。\n"
+            "只影响配音文本，不修改原字幕文件。")
+        self.filter_number_check.toggled.connect(self._save)
+        self.subtitle_group = SettingsGroup(
+            "字幕处理", "只影响配音文本，原字幕文件保持不变。")
+        self.subtitle_group.add_widget_row(self.filter_number_check)
+        layout.addWidget(self.subtitle_group)
+
         # Edge 模式参数
         self.edge_group = SettingsGroup(
             "Edge TTS 参数", "免费微软在线合成，无需本地服务。")
@@ -145,7 +158,8 @@ class TTSConfigPanel(QWidget):
         widgets = [self.voice_combo, self.rate_combo,
                    self.volume_combo,
                    self.api_combo,
-                   self.bulk_spin, self.multi_api_check, self.bulk_check]
+                   self.bulk_spin, self.multi_api_check, self.bulk_check,
+                   self.filter_number_check]
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -166,6 +180,8 @@ class TTSConfigPanel(QWidget):
             self.bulk_spin.setValue(cfg.get("bulk_batch_size", 20))
             self.multi_api_check.setChecked(cfg.get("use_multi_api", False))
             self.bulk_check.setChecked(cfg.get("use_bulk_api", True))
+            self.filter_number_check.setChecked(
+                cfg.get("filter_pure_number_lines", False))
             # 显示对应面板（不触发 _save）
             self._show_mode_group(0 if mode == "edge" else 1)
         finally:
@@ -248,6 +264,7 @@ class TTSConfigPanel(QWidget):
         cfg["bulk_batch_size"] = self.bulk_spin.value()
         cfg["use_multi_api"] = self.multi_api_check.isChecked()
         cfg["use_bulk_api"] = self.bulk_check.isChecked()
+        cfg["filter_pure_number_lines"] = self.filter_number_check.isChecked()
         cfg["current_api_index"] = max(0, self.api_combo.currentIndex())
         self.config.save()
         self.config_changed.emit()

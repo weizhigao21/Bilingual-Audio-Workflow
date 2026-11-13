@@ -27,6 +27,9 @@ from .common import STATUS_TEXT
 _DEFAULT_PREFIX = {1: "字幕", 2: "配音", 3: "成品"}
 _COMPACT_STATES = (STEP_DONE, STEP_SKIPPED)
 _MAX_EXPANDED = 16777215
+# 完成/跳过折叠高度。64px 会把标题行和按钮行各压到 17px，状态药丸里的
+# “已完成”被纵向裁掉；76px 下标题行 22px、按钮行 23px，药丸完整显示。
+_COMPACT_HEIGHT = 76
 
 
 def _html_escape(text: str, quote: bool = False) -> str:
@@ -346,7 +349,7 @@ class StepPanel(QFrame):
             self.summary_label.setToolTip("")
         for btn in self._extra_buttons:
             btn.setVisible(not self._compact)
-        self.setMaximumHeight(64 if self._compact else _MAX_EXPANDED)
+        self.setMaximumHeight(_COMPACT_HEIGHT if self._compact else _MAX_EXPANDED)
         self.setMinimumHeight(50 if self._compact else 0)
 
     def _apply_buttons(self):

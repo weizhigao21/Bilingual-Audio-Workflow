@@ -71,6 +71,9 @@ DEFAULT_CONFIG = {
         "edge_voice": "zh-CN-XiaoxiaoNeural",
         "edge_rate": "+0%",
         "edge_volume": "+0%",
+        # 只跳过“整条字幕只有数字”的片段；句内数字不删。默认关闭，避免
+        # 改变既有任务的听感/时长。
+        "filter_pure_number_lines": False,
         # 线程池容量与请求闸门取同一个值：池 < 闸门时闸门永不触发（旧默认
         # 5/8 让「全局并发上限」形同虚设），池 > 闸门时多余线程空转排队。
         # 运行时 TTSWorker 仍按 min(池, 闸门) 兜底兼容旧配置文件。

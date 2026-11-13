@@ -16,7 +16,10 @@ from pydub import AudioSegment
 from PyQt6.QtCore import QCoreApplication, Qt
 
 from src.steps.audio_utils.mixing import mix_with_numpy, _finish_mix
-from src.steps.audio_utils.rms import compute_rms_db, compute_rms_envelope
+from src.steps.audio_utils.rms import (
+    compute_rms_db, compute_rms_envelope, compute_speech_rms_db,
+    mask_speech_envelope, speech_intervals_from_positions,
+)
 from src.steps.audio_utils.detection import detect_voice_onset
 from src.steps.audio_utils.common import _submit_pan_detection
 from src.steps.audio_utils.ffmpeg_utils import resample_audio, _run_ffmpeg, export_audio_ffmpeg
@@ -106,6 +109,42 @@ class MixingTests(unittest.TestCase):
         ref, _ = compute_rms_envelope(audio(x))
         np.testing.assert_allclose(env, ref, atol=1e-8)
         self.assertAlmostEqual(float(env.mean()), compute_rms_db(audio(x)), places=5)
+
+    def test_speech_rms_ignores_silence_outside_subtitle_intervals(self):
+        # 1 秒人声 + 3 秒静音：整片 RMS 会被静音拉低约 6dB，人声段参考不应被拉低。
+        x = np.concatenate([tone(seconds=1, amplitude=10000),
+                            np.zeros(48000 * 3)])
+        seg = audio(x)
+        whole = compute_rms_db(seg)
+        speech = compute_speech_rms_db(seg, [(0, 1000)], percentile=50)
+        self.assertGreater(speech, whole + 5.0)
+
+    def test_speech_intervals_use_next_cue_and_cap_long_gaps(self):
+        intervals = speech_intervals_from_positions([0, 1000, 8000], 10000)
+        self.assertEqual(intervals, [(0, 1000), (1000, 6000), (8000, 10000)])
+
+    def test_speech_mask_holds_last_voice_level_through_silence(self):
+        envelope = np.array([-100.0, -100.0, -20.0, -20.0, -100.0, -100.0])
+        masked = mask_speech_envelope(
+            envelope, hop_ms=50, intervals_ms=[(100, 200)], smooth_ms=0)
+        np.testing.assert_allclose(masked, np.full(6, -20.0))
+
+    def test_fixed_mode_matches_speech_rms(self):
+        # 原始：1 秒 10000 幅度的人声 + 3 秒静音；配音 1 秒 3000 幅度。
+        # 固定模式应锚定人声段，而不是被静音拉低的整片 RMS。恒定功率声像
+        # 保留总功率，因此配音轨的立体声 RMS 应对齐原人声段的 RMS。
+        speech = tone(seconds=1, amplitude=10000)
+        left = np.concatenate([speech, np.zeros(48000 * 3)])
+        original = audio(np.column_stack([left, left]))
+        voice = audio(tone(seconds=1, amplitude=3000))
+        out = mix_with_numpy(original, [(voice, 0, 180)],
+                             auto_volume='fixed', peak_mode='soft')
+        before = np.frombuffer(original.raw_data, dtype=np.int16).astype(np.float64)
+        after = np.frombuffer(out.raw_data, dtype=np.int16).astype(np.float64)
+        dub = (after - before).reshape(-1, 2)[:48000]
+        dub_rms = np.sqrt(np.mean(dub ** 2))
+        target_rms = 10000.0 / np.sqrt(2.0)
+        self.assertAlmostEqual(dub_rms, target_rms, delta=target_rms * 0.03)
 
     def test_envelope_arbitrary_channels_and_tail(self):
         rng = np.random.default_rng(4)

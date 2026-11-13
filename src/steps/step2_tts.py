@@ -103,6 +103,7 @@ class TTSBridgeWorker(QThread):
             "edge_max_concurrent": cfg.get("edge_max_concurrent", 8),
             "use_bulk_api": cfg.get("use_bulk_api", True),
             "bulk_batch_size": cfg.get("bulk_batch_size", 20),
+            "filter_pure_number_lines": cfg.get("filter_pure_number_lines", False),
         }
 
         self.log_signal.emit(f"[配音] 启动: {os.path.basename(lrc_path)}")

@@ -9,9 +9,15 @@ from pydub import AudioSegment
 from .common import HAS_NUMPY, np, logger
 from .decode import load_audio_segment
 from .detection import find_nearest_onset, detect_voice_onset
-from .rms import compute_rms_db, compute_rms_envelope, interpolate_envelope
+from .rms import (compute_rms_db, compute_rms_envelope,
+                  compute_speech_rms_db, interpolate_envelope,
+                  mask_speech_envelope, speech_intervals_from_positions)
 from .ffmpeg_utils import resample_audio
 from .. import perf
+
+# 单声道配音经恒定功率声像定位后，总功率相对“双声道同幅原音”会低
+# 3.01dB；自动音量模式补回这一层，匹配的才是落点后的电平。
+_PAN_COMP_DB = 10.0 * math.log10(2.0)
 
 
 def _check_stop(stop_check):
@@ -235,19 +241,40 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
 
         vol_linear = 10.0 ** (volume_db / 20.0)
 
+        speech_intervals = speech_intervals_from_positions(
+            all_pos_ms, total_duration_ms)
         original_rms_db = None
         original_rms_envelope = None
         env_hop_ms = 50
         if auto_volume == "fixed":
-            original_rms_db = compute_rms_db(original)
-            logger.debug(f"[混音] auto_volume=fixed, 原始音频RMS={original_rms_db:.1f}dBFS, volume_db={volume_db}")
+            original_rms_db = compute_speech_rms_db(
+                original, speech_intervals)
+            logger.debug(
+                f"[混音] auto_volume=fixed, 人声段参考={original_rms_db:.1f}dBFS, "
+                f"区间={len(speech_intervals)}, volume_db={volume_db}, "
+                f"声像补偿=+{_PAN_COMP_DB:.2f}dB")
         elif auto_volume == "auto":
-            original_rms_envelope, env_hop_ms = compute_rms_envelope(original, window_ms=100, hop_ms=50)
+            original_rms_envelope, env_hop_ms = compute_rms_envelope(
+                original, window_ms=100, hop_ms=50)
             if original_rms_envelope is not None:
-                logger.debug(f"[混音] auto_volume=auto, 包络长度={len(original_rms_envelope)}, hop={env_hop_ms}ms, volume_db={volume_db}")
+                masked = mask_speech_envelope(
+                    original_rms_envelope, env_hop_ms, speech_intervals)
+                if masked is not None:
+                    original_rms_envelope = masked
+                    logger.debug(
+                        f"[混音] auto_volume=auto, 人声段包络长度={len(masked)}, "
+                        f"hop={env_hop_ms}ms, 区间={len(speech_intervals)}, "
+                        f"声像补偿=+{_PAN_COMP_DB:.2f}dB")
+                else:
+                    logger.debug(
+                        "[混音] auto_volume=auto, 人声段包络无有效帧，"
+                        "保留整段包络")
             else:
-                original_rms_db = compute_rms_db(original)
-                logger.debug(f"[混音] auto_volume=auto fallback to fixed, RMS={original_rms_db:.1f}dBFS")
+                original_rms_db = compute_speech_rms_db(
+                    original, speech_intervals)
+                logger.debug(
+                    f"[混音] auto_volume=auto fallback to fixed, "
+                    f"人声段参考={original_rms_db:.1f}dBFS")
 
         # 片段准备（解码+单声道+重采样）并发执行、消费严格按原序：
         # 输出与旧串行路径逐位一致，进度回调与跳过语义不变。
@@ -311,7 +338,7 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
 
             if original_rms_db is not None:
                 seg_rms_db = compute_rms_db(mix_mono)
-                target_rms_db = original_rms_db + volume_db
+                target_rms_db = original_rms_db + volume_db + _PAN_COMP_DB
                 gain_db = target_rms_db - seg_rms_db
                 gain_db = max(-50.0, min(50.0, gain_db))
                 gain_linear = 10.0 ** (gain_db / 20.0)
@@ -324,7 +351,7 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
                     original_rms_envelope, env_hop_ms, frame_rate,
                     actual_pos_ms, len(mix_raw),
                 )
-                target_rms = orig_env_at_seg + volume_db
+                target_rms = orig_env_at_seg + volume_db + _PAN_COMP_DB
                 gain_db = target_rms - seg_rms_db
                 gain_db = np.clip(gain_db, -50.0, 50.0)
                 gain_curve = 10.0 ** (gain_db / 20.0)

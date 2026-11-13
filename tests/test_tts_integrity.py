@@ -43,6 +43,61 @@ class TTSProfileTests(unittest.TestCase):
             self.assertEqual(statuses,[False])
             self.assertFalse(profile_matches(str(Path(config['output_dir'])/'abc'), config))
 
+    def test_pure_number_lines_are_skipped_before_tts(self):
+        """SRT 里只有数字的整行不进入待合成队列，句内数字不动。"""
+        srt = (
+            "1\n00:00:00,000 --> 00:00:01,000\n七\n\n"
+            "2\n00:00:01,000 --> 00:00:02,000\n第3集开始了\n\n"
+            "3\n00:00:02,000 --> 00:00:03,000\n六\n\n"
+            "4\n00:00:03,000 --> 00:00:04,000\n2024\n\n"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            subtitle = Path(folder) / 'source.srt'
+            subtitle.write_text(srt, encoding='utf-8')
+            config = {
+                'tts_mode': 'edge', 'lrc_files': [str(subtitle)],
+                'output_dir': str(Path(folder) / 'out'),
+                'subtitle_md5': 'abc', 'prevent_sleep': False,
+                'edge_threads': 1, 'filter_pure_number_lines': True,
+            }
+            captured = {}
+            logs = []
+            with patch('src.steps.tts_worker.AudioCache', return_value=FakeCache()):
+                worker = TTSWorker(config)
+            worker.log_signal.connect(logs.append, Qt.ConnectionType.DirectConnection)
+            with patch.object(TTSWorker, '_run_edge_tts',
+                              lambda self, pending, *a, **k: captured.update(
+                                  tasks=list(pending))):
+                worker.run()
+            self.assertEqual([t[2] for t in captured['tasks']],
+                             ['第3集开始了'])
+            self.assertTrue(any('已过滤 3 条纯数字字幕' in line for line in logs),
+                            logs)
+
+    def test_srt_numeric_text_is_kept_when_filter_is_off(self):
+        """“2024”在字幕后是正文，不能因为 isdigit() 被当成序号吞掉。"""
+        srt = (
+            "1\n00:00:00,000 --> 00:00:01,000\n七\n\n"
+            "2\n00:00:01,000 --> 00:00:02,000\n2024\n\n"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            subtitle = Path(folder) / 'source.srt'
+            subtitle.write_text(srt, encoding='utf-8')
+            config = {
+                'tts_mode': 'edge', 'lrc_files': [str(subtitle)],
+                'output_dir': str(Path(folder) / 'out'),
+                'subtitle_md5': 'abc', 'prevent_sleep': False,
+                'edge_threads': 1, 'filter_pure_number_lines': False,
+            }
+            captured = {}
+            with patch('src.steps.tts_worker.AudioCache', return_value=FakeCache()):
+                worker = TTSWorker(config)
+            with patch.object(TTSWorker, '_run_edge_tts',
+                              lambda self, pending, *a, **k: captured.update(
+                                  tasks=list(pending))):
+                worker.run()
+            self.assertEqual([t[2] for t in captured['tasks']], ['七', '2024'])
+
     def test_changing_tts_profile_invalidates_active_task_and_mix(self):
         with tempfile.TemporaryDirectory() as folder:
             old={'tts_mode':'edge','edge_voice':'v1'}
@@ -137,6 +192,16 @@ class TTSProfileTests(unittest.TestCase):
         self.assertEqual(profile_key(dict(base, edge_threads=20)), key)
         api = {'tts_mode':'api', 'api_configs':[{'url':'http://a','model':'m'}]}
         self.assertNotEqual(profile_key(api), profile_key({'tts_mode':'api','api_configs':[{'url':'http://b','model':'m'}]}))
+
+    def test_pure_number_filter_changes_profile_only_when_enabled(self):
+        """默认关闭必须保持旧目录哈希；开启后要换目录，避免复用旧音频。"""
+        base = {'tts_mode': 'edge', 'edge_voice': 'voice'}
+        self.assertEqual(
+            profile_key(dict(base, filter_pure_number_lines=False)),
+            profile_key(base))
+        self.assertNotEqual(
+            profile_key(dict(base, filter_pure_number_lines=True)),
+            profile_key(base))
 
     def test_task_import_requires_matching_profile_and_remix(self):
         cfg = {'tts_mode':'edge', 'edge_voice':'v1'}

@@ -456,10 +456,30 @@ class StepPanelOutputTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        # 状态药丸的尺寸由 QSS 的 padding/font-size 决定，必须套上主题再量。
+        cls.app.setStyleSheet(build_stylesheet())
 
     def setUp(self):
         self.panel = StepPanel(1, "字幕提取")
         self.addCleanup(self.panel.deleteLater)
+
+    def test_completed_compact_card_does_not_clip_status_pill(self):
+        """完成卡折叠后不能把「已完成」药丸纵向裁掉。
+
+        64px 上限会把标题行和按钮行各压到 17px，药丸只剩上半截；
+        折叠高度必须留够 QLabel 的 sizeHint。
+        """
+        self.panel.set_output("C:/work/tasks/subtitle.lrc", "字幕")
+        self.panel.set_status(STEP_DONE)
+        self.panel.resize(600, 76)
+        self.panel.show()
+        for _ in range(3):
+            self.app.processEvents()
+        self.assertGreaterEqual(
+            self.panel.status_label.height(),
+            self.panel.status_label.sizeHint().height(),
+            "完成态卡片高度不足，状态药丸文字被裁切",
+        )
 
     def test_output_label_shows_filename_only(self):
         self.panel.set_output("C:/work/tasks/subtitle.lrc", "字幕")

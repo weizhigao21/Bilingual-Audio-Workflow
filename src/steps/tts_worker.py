@@ -13,6 +13,7 @@ from .local_voice_stream import supports_incremental, run_incremental
 from .tts_logger import logger
 from .tts_profile import profile_matches, save_profile, dir_name
 from .edge_voices import EDGE_TTS_VOICES
+from .tts_text_filter import is_pure_number_line
 from . import perf
 from .tts_utils import (
     set_sleep_mode,
@@ -102,6 +103,17 @@ class TTSWorker(QThread):
             lrc_files = self.config["lrc_files"]
             base_output = os.path.abspath(self.config["output_dir"])
             all_tasks = []
+            filter_pure_numbers = bool(
+                self.config.get("filter_pure_number_lines", False))
+            filtered_count = 0
+
+            def _filter_text(text):
+                """整条纯数字字幕返回空串并计数；句内数字原样保留。"""
+                nonlocal filtered_count
+                if filter_pure_numbers and is_pure_number_line(text):
+                    filtered_count += 1
+                    return ""
+                return text
 
             # 目录名 = md5(字幕内容 | 配音配置签名)：由 step2_tts 算好传入；
             # 兜底路径（无字幕时）用 source_name 走同一套命名，避免命名规则分叉
@@ -149,7 +161,7 @@ class TTSWorker(QThread):
                             seconds = match_full.group(3)
                             milliseconds = match_full.group(4)
                             timestamp = f"{hours}:{minutes}:{seconds}.{milliseconds}"
-                            text = match_full.group(5).strip()
+                            text = _filter_text(match_full.group(5).strip())
                             if text:
                                 all_tasks.append((idx, timestamp, text, save_dir, file_mtime))
                                 idx += 1
@@ -160,7 +172,7 @@ class TTSWorker(QThread):
                             seconds = match_min.group(2)
                             milliseconds = match_min.group(3)
                             timestamp = f"00:{minutes}:{seconds}.{milliseconds}"
-                            text = match_min.group(4).strip()
+                            text = _filter_text(match_min.group(4).strip())
                             if text:
                                 all_tasks.append((idx, timestamp, text, save_dir, file_mtime))
                                 idx += 1
@@ -181,7 +193,7 @@ class TTSWorker(QThread):
 
                         if not line:
                             if current_timestamp and current_text:
-                                text = " ".join(current_text).strip()
+                                text = _filter_text(" ".join(current_text).strip())
                                 if text:
                                     all_tasks.append(
                                         (idx, current_timestamp, text, save_dir, file_mtime)
@@ -208,7 +220,7 @@ class TTSWorker(QThread):
                             current_text.append(line)
 
                     if current_timestamp and current_text:
-                        text = " ".join(current_text).strip()
+                        text = _filter_text(" ".join(current_text).strip())
                         if text:
                             all_tasks.append(
                                 (idx, current_timestamp, text, save_dir, file_mtime)
@@ -227,7 +239,7 @@ class TTSWorker(QThread):
 
                         if not line:
                             if current_timestamp and current_text:
-                                text = " ".join(current_text).strip()
+                                text = _filter_text(" ".join(current_text).strip())
                                 if text:
                                     all_tasks.append(
                                         (idx, current_timestamp, text, save_dir, file_mtime)
@@ -237,7 +249,9 @@ class TTSWorker(QThread):
                                 current_timestamp = None
                             continue
 
-                        if line.isdigit():
+                        # 序号行只在时间戳之前跳过；进入字幕后，“2024”
+                        # 这类纯数字正文不能当成序号吞掉。
+                        if line.isdigit() and current_timestamp is None:
                             continue
 
                         time_match = srt_time_pattern.match(line)
@@ -257,7 +271,7 @@ class TTSWorker(QThread):
                             current_text.append(line)
 
                     if current_timestamp and current_text:
-                        text = " ".join(current_text).strip()
+                        text = _filter_text(" ".join(current_text).strip())
                         if text:
                             all_tasks.append(
                                 (idx, current_timestamp, text, save_dir, file_mtime)
@@ -265,14 +279,21 @@ class TTSWorker(QThread):
                             idx += 1
                 elif file_ext == ".txt":
                     for line in lines:
-                        text = line.strip()
+                        text = _filter_text(line.strip())
                         if text:
                             timestamp = "00:00:00.00"
                             all_tasks.append((idx, timestamp, text, save_dir, file_mtime))
                             idx += 1
 
+            if filtered_count:
+                self.log_signal.emit(
+                    f"[配音] 已过滤 {filtered_count} 条纯数字字幕"
+                    "（整条仅中文/阿拉伯数字，原字幕文件未改动）")
             if not all_tasks:
-                self.log_signal.emit("未找到有效歌词")
+                if filtered_count:
+                    self.log_signal.emit("字幕全部为纯数字，过滤后无可配音片段")
+                else:
+                    self.log_signal.emit("未找到有效歌词")
                 self.finished_signal.emit(False)
                 return
 
