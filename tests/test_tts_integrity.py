@@ -12,7 +12,8 @@ from PyQt6.QtCore import Qt
 from src.steps import tts_cache, tts_utils
 from src.steps.tts_profile import profile_key, profile_matches, save_profile
 from src.steps.tts_worker import TTSWorker
-from src.task_manager import create_task, TaskQueue, STEP_PENDING, STEP_SKIPPED
+from src.task_manager import (create_task, TaskQueue, STEP_DONE,
+                              STEP_PENDING, STEP_SKIPPED)
 from src import config as config_module
 from src import task_manager
 from src.workflow_gui.config_mixin import ConfigDialogMixin
@@ -119,6 +120,18 @@ class TTSProfileTests(unittest.TestCase):
             self.assertEqual((task.step2_status,task.step3_status),(STEP_PENDING,STEP_PENDING))
             self.assertTrue(task.force_remix)
             self.assertEqual(updates,[task])
+
+    def test_tts_affected_tasks_uses_shared_step_constants(self):
+        """回归：_tts_affected_tasks 曾漏导入 STEP_DONE，打开设置即 NameError。"""
+        task = SimpleNamespace(custom_mix_folder='', step2_status=STEP_DONE,
+                               step2_output='tts')
+        host = SimpleNamespace(
+            task_queue=SimpleNamespace(tasks=[task]),
+            config=SimpleNamespace(tts_cfg={}),
+        )
+        with patch('src.steps.tts_profile.profile_matches', return_value=False):
+            affected = ConfigDialogMixin._tts_affected_tasks(host)
+        self.assertEqual(affected, [task])
 
     def test_config_dialog_actually_wires_tts_change_handler(self):
         """回归：处理器有实现、有单测，却从未被设置弹窗连接（线上失效）。"""

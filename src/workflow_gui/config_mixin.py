@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import SetupDialog, WorkflowConfig
+from ..task_manager import STEP_DONE, STEP_SKIPPED
 from ..ui_theme import WheelScrollGuard, repolish
 from ..widgets import TTSConfigPanel, MixerConfigPanel, WhisperConfigPanel
 from ..widgets.settings_group import PathRow, SettingsGroup
