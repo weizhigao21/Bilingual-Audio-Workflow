@@ -183,6 +183,15 @@ class FolderImportTests(unittest.TestCase):
         self.assertEqual(len(window.task_queue.tasks), 2)
         self.assertIsNone(window.task_queue.current)
         self.assertTrue(window.batch_btn.isEnabled())
+        # 页头直接汇总整个队列，主按钮变成「全部执行」而不是禁用
+        self.assertEqual(window.current_task_label.text(), "已识别 2 个任务")
+        self.assertIn("2 个未完成", window.scope_label.text())
+        self.assertEqual(window.run_task_btn.text(), "全部执行（2）")
+        self.assertTrue(window.run_task_btn.isEnabled())
+        with patch.object(window, "_start_scope_pipeline") as start:
+            window._on_run_task()
+        start.assert_called_once()
+        self.assertEqual(len(start.call_args.args[0]), 2)
 
     def test_output_collision_auto_skips_duplicate_target(self):
         first = self.make("A/one.mp3")

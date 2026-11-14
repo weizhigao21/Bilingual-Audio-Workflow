@@ -146,25 +146,46 @@ class TaskMixin:
             self._selected_folder = None
             has_tasks = bool(self.task_queue.tasks)
             self._set_empty_state(True)
-            if hasattr(self, "empty_title"):
-                self.empty_title.setText(
-                    "选择一个任务" if has_tasks else "还没有任务")
-                self.empty_desc.setText(
-                    "左侧是任务队列；点一个任务或文件夹，这里显示它的三步进度。"
-                    if has_tasks else
-                    "添加素材后，这里按「字幕 → 配音 → 混音」三步推进；"
-                    "顶部「执行本任务」会一次跑完剩余步骤。")
-            self.current_task_label.setText(
-                "未选择任务" if not has_tasks else "选择左侧任务")
-            scope_tag = getattr(self, "scope_label", None)
-            if scope_tag is not None:
-                scope_tag.setText("" if not has_tasks else "未选择")
-            self.current_task_label.setToolTip("")
-            subtitle = getattr(self, "current_task_subtitle", None)
-            if subtitle is not None:
-                subtitle.setText("选择左侧任务，或添加视频/音频文件开始"
-                                 if not has_tasks else "点左侧任务或文件夹查看详情")
-                subtitle.setToolTip("")
+            if has_tasks:
+                total = len(self.task_queue.tasks)
+                pending = len(self._pending_tasks(self.task_queue.tasks))
+                self.current_task_label.setText(f"已识别 {total} 个任务")
+                self.current_task_label.setToolTip(
+                    f"队列共 {total} 个任务；未选中单条，当前作用域为全部任务")
+                scope_tag = getattr(self, "scope_label", None)
+                if scope_tag is not None:
+                    scope_tag.setText(f"{pending} 个未完成" if pending else "全部已完成")
+                subtitle = getattr(self, "current_task_subtitle", None)
+                if subtitle is not None:
+                    subtitle.setText(
+                        f"点击顶部「全部执行（{pending}）」一次跑完剩余步骤；"
+                        "需要改范围或步骤请用「批量执行…」。"
+                        if pending else
+                        "队列内所有任务已完成；点左侧任务可查看成品。")
+                    subtitle.setToolTip("")
+                if hasattr(self, "empty_title"):
+                    self.empty_title.setText(f"已识别 {total} 个任务")
+                    self.empty_desc.setText(
+                        f"其中 {pending} 个还有未完成步骤。"
+                        "点击顶部「全部执行」即可按「字幕 → 配音 → 混音」跑完；"
+                        "已完成的步骤会自动跳过。"
+                        if pending else
+                        "所有任务都已完成。点左侧任务查看成品，或继续拖入新素材。")
+            else:
+                if hasattr(self, "empty_title"):
+                    self.empty_title.setText("还没有任务")
+                    self.empty_desc.setText(
+                        "添加素材后，这里按「字幕 → 配音 → 混音」三步推进；"
+                        "顶部「执行本任务」会一次跑完剩余步骤。")
+                self.current_task_label.setText("未选择任务")
+                scope_tag = getattr(self, "scope_label", None)
+                if scope_tag is not None:
+                    scope_tag.setText("")
+                self.current_task_label.setToolTip("")
+                subtitle = getattr(self, "current_task_subtitle", None)
+                if subtitle is not None:
+                    subtitle.setText("选择左侧任务，或添加视频/音频文件开始")
+                    subtitle.setToolTip("")
             for panel in self.step_panels.values():
                 panel.reset()
             self._update_header(None)
@@ -238,6 +259,7 @@ class TaskMixin:
             return
         busy = self._batch_executor is not None or any(self._workers.values())
         has_scope = bool(self.task_queue.current or self._current_group)
+        all_tasks = list(self.task_queue.tasks)
         if busy:
             run_btn.setText("停止")
             run_btn.setEnabled(True)
@@ -249,6 +271,20 @@ class TaskMixin:
             elif self._current_group is not None:
                 count = len(self._current_group.tasks)
                 run_btn.setText(f"执行组（{count}）")
+            elif self.task_queue.current is None and all_tasks:
+                # 拖入多个文件后不自动选中最后一条；页头直接汇总整个队列，
+                # 主按钮就是“全部执行”，避免用户误以为只能执行一个。
+                pending = self._pending_tasks(all_tasks)
+                if pending:
+                    run_btn.setText(f"全部执行（{len(pending)}）")
+                    run_btn.setEnabled(True)
+                    run_btn.setToolTip(
+                        f"已识别 {len(all_tasks)} 个任务，其中 {len(pending)} 个"
+                        "有未完成步骤；点击按流水线全部执行")
+                else:
+                    run_btn.setText("全部完成")
+                    run_btn.setEnabled(False)
+                    run_btn.setToolTip("队列内所有任务均已完成")
             else:
                 current = self.task_queue.current
                 pending = [s for s in (1, 2, 3)
@@ -504,7 +540,18 @@ class TaskMixin:
         if self._current_group is not None:
             return list(self._current_group.tasks)
         current = self.task_queue.current
-        return [current] if current else []
+        if current is not None:
+            return [current]
+        # 批量导入后故意不选中最后一条；此时主按钮的作用域应是整个队列，
+        # 而不是“没有任务”，否则用户只能再进批量对话框选一次范围。
+        return list(self.task_queue.tasks)
+
+    @staticmethod
+    def _pending_tasks(tasks):
+        """返回还有任一步骤未完成/未跳过的任务。"""
+        return [t for t in tasks
+                if any(t.step_status(s) not in (STEP_DONE, STEP_SKIPPED)
+                       for s in (1, 2, 3))]
 
     def _on_run_task(self):
         """唯一主按钮：按 1→2→3 执行当前作用域内尚未完成的步骤。"""
@@ -516,9 +563,7 @@ class TaskMixin:
             QMessageBox.information(self, "没有可执行的任务",
                                     "请先在左侧选择任务或添加素材。")
             return
-        pending = [t for t in tasks
-                   if any(t.step_status(s) not in (STEP_DONE, STEP_SKIPPED)
-                          for s in (1, 2, 3))]
+        pending = self._pending_tasks(tasks)
         if not pending:
             current = self.task_queue.current
             if current is not None and current.step3_output:
