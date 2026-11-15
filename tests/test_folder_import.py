@@ -193,6 +193,32 @@ class FolderImportTests(unittest.TestCase):
         start.assert_called_once()
         self.assertEqual(len(start.call_args.args[0]), 2)
 
+    def test_multi_folder_import_clears_last_group_and_runs_all(self):
+        first_dir = self.root / "RJ01205064"
+        second_dir = self.root / "RJ01375207"
+        for folder in (first_dir, second_dir):
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "01 本编.mp3").write_bytes(b"audio")
+        config = SimpleNamespace(
+            workspace_dir=str(Path(self.temp.name) / "tasks-folders"),
+            tts_cfg={}, mixer_cfg={"folder_prefix": False},
+            whisper_cfg={}, config={},
+        )
+        window = WorkflowMainWindow(config)
+        self.addCleanup(window.close)
+        window.on_files_dropped([str(first_dir), str(second_dir)])
+        self.assertEqual(len(window.task_queue.groups), 2)
+        self.assertIsNone(window._current_group)
+        self.assertIsNone(window.task_queue.current)
+        self.assertEqual(window.current_task_label.text(), "已识别 2 个任务")
+        self.assertIn("2 个未完成", window.scope_label.text())
+        self.assertEqual(window.run_task_btn.text(), "全部执行（2）")
+        self.assertTrue(window.run_task_btn.isEnabled())
+        with patch.object(window, "_start_scope_pipeline") as start:
+            window._on_run_task()
+        start.assert_called_once()
+        self.assertEqual(len(start.call_args.args[0]), 2)
+
     def test_output_collision_auto_skips_duplicate_target(self):
         first = self.make("A/one.mp3")
         self.make("B/one.mp3")

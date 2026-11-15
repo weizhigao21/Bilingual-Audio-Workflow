@@ -69,10 +69,11 @@ class ToolbarMixin:
 
         递归扫描文件夹中的媒体文件，自动匹配同名字幕创建子任务，
         文件夹以组节点形式保留在任务列表中，可展开查看音频树。
+        返回新建的组；没有可导入内容时返回 None。
         """
         if not os.path.isdir(folder):
             self._append_log(f"[文件夹] 路径不存在: {folder}")
-            return
+            return None
 
         folder_name = os.path.basename(folder) or folder
         candidates = build_folder_import_plan(
@@ -82,7 +83,7 @@ class ToolbarMixin:
         )
         if not candidates:
             self._append_log(f"[文件夹] 未找到支持的媒体文件: {folder_name}")
-            return
+            return None
 
         selected = []
         seen_outputs = set()
@@ -99,7 +100,7 @@ class ToolbarMixin:
             selected.append(candidate)
         if not selected:
             self._append_log(f"[文件夹] 没有可导入的源媒体文件: {folder_name}")
-            return
+            return None
 
         # 创建文件夹任务组
         group = self.task_queue.create_group(folder)
@@ -122,6 +123,7 @@ class ToolbarMixin:
         # 页头误显示“单个任务”，主按钮只会跑这一条。
         self._restore_import_selection(list(group.tasks), group.group_id)
         self._show_toast(f"已导入文件夹「{group.group_name}」：{len(group.tasks)} 个任务")
+        return group
 
     def _find_matching_subtitle(self, media_path: str) -> str:
         """查找与媒体文件同目录、同名的字幕文件。
@@ -226,13 +228,16 @@ class ToolbarMixin:
         video_files = []
         subtitle_files = []
         wav_files = []
+        scanned_groups = []
 
         for path in files:
             if not os.path.exists(path):
                 continue
             if os.path.isdir(path):
                 # 目录：扫描媒体文件自动创建任务
-                self._scan_folder_for_tasks(path)
+                group = self._scan_folder_for_tasks(path)
+                if group is not None:
+                    scanned_groups.append(group)
             else:
                 ext = os.path.splitext(path)[1].lower()
                 if ext in SUBTITLE_EXTS:
@@ -243,6 +248,20 @@ class ToolbarMixin:
                     video_files.append(path)
                 else:
                     self._append_log(f"[拖拽] 跳过不支持的文件: {path}")
+
+        # 一次拖入多个文件夹时，不能停在最后一个组上：否则页头只显示
+        # 「执行组（1）」，用户会误以为另外的文件夹没有导入。收回选中，
+        # 让页头按整个队列汇总，主按钮显示「全部执行（N）」。
+        if len(scanned_groups) > 1:
+            total = sum(len(group.tasks) for group in scanned_groups)
+            self._current_group = None
+            self._selected_folder = None
+            self.task_queue.set_current(None)
+            self.task_list.setCurrentItem(None)
+            self._on_current_changed(None)
+            self._append_log(
+                f"[导入] 已识别 {len(scanned_groups)} 个文件夹、共 {total} 个任务；"
+                "可在页头直接「全部执行」")
 
         # 先把「落到哪里」说清楚，避免同一动作三种结果却没有任何提示
         dest = (f"文件夹组「{self._current_group.group_name}」"
