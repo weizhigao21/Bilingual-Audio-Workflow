@@ -219,6 +219,28 @@ class FolderImportTests(unittest.TestCase):
         start.assert_called_once()
         self.assertEqual(len(start.call_args.args[0]), 2)
 
+    def test_second_folder_import_switches_to_all_queue(self):
+        first_dir = self.root / "RJ01205064"
+        second_dir = self.root / "RJ01375207"
+        for folder in (first_dir, second_dir):
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "01 本编.mp3").write_bytes(b"audio")
+        config = SimpleNamespace(
+            workspace_dir=str(Path(self.temp.name) / "tasks-sequential"),
+            tts_cfg={}, mixer_cfg={"folder_prefix": False},
+            whisper_cfg={}, config={},
+        )
+        window = WorkflowMainWindow(config)
+        self.addCleanup(window.close)
+        window.on_files_dropped([str(first_dir)])
+        self.assertIsNotNone(window._current_group)
+        self.assertEqual(window.run_task_btn.text(), "执行组（1）")
+        window.on_files_dropped([str(second_dir)])
+        self.assertEqual(len(window.task_queue.groups), 2)
+        self.assertIsNone(window._current_group)
+        self.assertEqual(window.current_task_label.text(), "已识别 2 个任务")
+        self.assertEqual(window.run_task_btn.text(), "全部执行（2）")
+
     def test_output_collision_auto_skips_duplicate_target(self):
         first = self.make("A/one.mp3")
         self.make("B/one.mp3")

@@ -121,7 +121,19 @@ class ToolbarMixin:
         )
         # 导入结束时把选中项收回组节点：否则会停在最后一个子任务，
         # 页头误显示“单个任务”，主按钮只会跑这一条。
-        self._restore_import_selection(list(group.tasks), group.group_id)
+        # 但队列里已经有多个文件夹组时，停在某一组会显示「执行组（1）」，
+        # 让用户误以为其他组没被识别；此时改回整个队列汇总。
+        if len(self.task_queue.groups) > 1:
+            self._current_group = None
+            self._selected_folder = None
+            self.task_queue.set_current(None)
+            self.task_list.setCurrentItem(None)
+            self._on_current_changed(None)
+            self._append_log(
+                f"[导入] 队列已有 {len(self.task_queue.groups)} 个文件夹组；"
+                "页头切换为「全部执行」")
+        else:
+            self._restore_import_selection(list(group.tasks), group.group_id)
         self._show_toast(f"已导入文件夹「{group.group_name}」：{len(group.tasks)} 个任务")
         return group
 

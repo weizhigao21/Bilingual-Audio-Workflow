@@ -8,9 +8,9 @@
 
 - 之前一次拖入两个文件夹会分别创建两个组，但每个组导入结束时都把选中项收回自己；最终页头停在最后一个组，主按钮显示「执行组（1）」，看起来像另外的任务没有被识别。
 - `_scan_folder_for_tasks` 现在返回新建的组；`on_files_dropped` 收集本次拖入创建的所有组。一次拖入多个文件夹时清空组/单任务选中，页头改为「已识别 N 个任务 / M 个未完成」，主按钮为「全部执行（M）」。
-- 只拖入一个文件夹时仍保持该组选中，「执行组（N）」的原有行为不变。
-- 新增回归测试 `test_multi_folder_import_clears_last_group_and_runs_all`：两个文件夹各一个音频，导入后组数为 2、无当前组/任务，页头显示 2 个任务、2 个未完成，点击「全部执行」时流水线收到 2 个任务。
-- 验证：带 ffmpeg PATH 全量 `410 passed / 73 subtests passed`。
+- 队列里已经有多个文件夹组时再导入新文件夹，也会自动切回队列汇总，不会停留在新导入组的「执行组（1）」；只拖入一个文件夹且队列只有该组时仍保持「执行组（N）」。
+- 新增回归测试 `test_multi_folder_import_clears_last_group_and_runs_all` 与 `test_second_folder_import_switches_to_all_queue`：两个文件夹各一个音频，导入后组数为 2、无当前组/任务，页头显示 2 个任务、2 个未完成，点击「全部执行」时流水线收到 2 个任务。
+- 验证：带 ffmpeg PATH 全量 `411 passed / 73 subtests passed`。
 
 ## [v2.4.3] - 2026-11-14
 
