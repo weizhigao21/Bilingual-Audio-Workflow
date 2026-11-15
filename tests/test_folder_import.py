@@ -183,10 +183,10 @@ class FolderImportTests(unittest.TestCase):
         self.assertEqual(len(window.task_queue.tasks), 2)
         self.assertIsNone(window.task_queue.current)
         self.assertTrue(window.batch_btn.isEnabled())
-        # 页头直接汇总整个队列，主按钮变成「全部执行」而不是禁用
+        # 页头直接汇总整个队列，主按钮固定「全部执行」而不是禁用
         self.assertEqual(window.current_task_label.text(), "已识别 2 个任务")
         self.assertIn("2 个未完成", window.scope_label.text())
-        self.assertEqual(window.run_task_btn.text(), "全部执行（2）")
+        self.assertEqual(window.run_task_btn.text(), "全部执行")
         self.assertTrue(window.run_task_btn.isEnabled())
         with patch.object(window, "_start_scope_pipeline") as start:
             window._on_run_task()
@@ -212,7 +212,7 @@ class FolderImportTests(unittest.TestCase):
         self.assertIsNone(window.task_queue.current)
         self.assertEqual(window.current_task_label.text(), "已识别 2 个任务")
         self.assertIn("2 个未完成", window.scope_label.text())
-        self.assertEqual(window.run_task_btn.text(), "全部执行（2）")
+        self.assertEqual(window.run_task_btn.text(), "全部执行")
         self.assertTrue(window.run_task_btn.isEnabled())
         with patch.object(window, "_start_scope_pipeline") as start:
             window._on_run_task()
@@ -234,12 +234,12 @@ class FolderImportTests(unittest.TestCase):
         self.addCleanup(window.close)
         window.on_files_dropped([str(first_dir)])
         self.assertIsNotNone(window._current_group)
-        self.assertEqual(window.run_task_btn.text(), "执行组（1）")
+        self.assertEqual(window.run_task_btn.text(), "全部执行")
         window.on_files_dropped([str(second_dir)])
         self.assertEqual(len(window.task_queue.groups), 2)
         self.assertIsNone(window._current_group)
         self.assertEqual(window.current_task_label.text(), "已识别 2 个任务")
-        self.assertEqual(window.run_task_btn.text(), "全部执行（2）")
+        self.assertEqual(window.run_task_btn.text(), "全部执行")
 
     def test_output_collision_auto_skips_duplicate_target(self):
         first = self.make("A/one.mp3")

@@ -290,10 +290,10 @@ class WorkflowMainWindow(
         self.batch_btn.setToolTip("选择范围与步骤，批量执行多个任务")
         self.batch_btn.clicked.connect(self._on_batch_execute)
         header.addWidget(self.batch_btn)
-        self.run_task_btn = QPushButton("执行本任务")
+        self.run_task_btn = QPushButton("全部执行")
         self.run_task_btn.setProperty("kind", "primary")
         self.run_task_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.run_task_btn.setToolTip("按 1→2→3 依次执行当前作用域内尚未完成的步骤")
+        self.run_task_btn.setToolTip("跑完队列内所有未完成步骤，已完成的自动跳过")
         self.run_task_btn.clicked.connect(self._on_run_task)
         header.addWidget(self.run_task_btn)
         # 兼容旧 mixin：不用第二个"停止批量"按钮，停止统一走 run_task_btn
@@ -437,7 +437,7 @@ class WorkflowMainWindow(
         layout.addWidget(title)
         self.empty_title = title
         desc = QLabel("添加素材后，这里按「字幕 → 配音 → 混音」三步推进；"
-                      "顶部「执行本任务」会一次跑完剩余步骤。")
+                      "顶部「全部执行」会一次跑完队列里剩余步骤。")
         desc.setProperty("role", "muted")
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignmentFlag.AlignHCenter)

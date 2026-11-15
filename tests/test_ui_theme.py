@@ -298,8 +298,8 @@ class ToolbarEntryTests(unittest.TestCase):
         self.window.resize(1380, 900)
 
     def test_header_has_one_primary_action(self):
-        # 全局唯一主按钮是「执行本任务」；批量降为文字按钮
-        self.assertEqual(self.window.run_task_btn.text(), "执行本任务")
+        # 全局唯一主按钮是「全部执行」；批量降为文字按钮
+        self.assertEqual(self.window.run_task_btn.text(), "全部执行")
         self.assertEqual(self.window.run_task_btn.property("kind"), "primary")
         self.assertEqual(self.window.batch_btn.text(), "批量执行…")
         self.assertEqual(self.window.batch_btn.property("kind"), "text")
@@ -315,7 +315,7 @@ class ToolbarEntryTests(unittest.TestCase):
                      if b.property("kind") == "primary"
                      and b.isVisibleTo(self.window)]
         self.assertEqual(len(primaries), 2,
-                         "可见主按钮应只剩「添加素材」与「执行本任务」")
+                         "可见主按钮应只剩「添加素材」与「全部执行」")
 
     def test_add_media_entry_lives_in_sidebar_above_tree(self):
         """合并后的添加入口在侧栏、位于程序名之下、任务树之上。"""

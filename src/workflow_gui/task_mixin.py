@@ -158,7 +158,7 @@ class TaskMixin:
                 subtitle = getattr(self, "current_task_subtitle", None)
                 if subtitle is not None:
                     subtitle.setText(
-                        f"点击顶部「全部执行（{pending}）」一次跑完剩余步骤；"
+                        "点击顶部「全部执行」一次跑完整个队列的剩余步骤；"
                         "需要改范围或步骤请用「批量执行…」。"
                         if pending else
                         "队列内所有任务已完成；点左侧任务可查看成品。")
@@ -176,7 +176,7 @@ class TaskMixin:
                     self.empty_title.setText("还没有任务")
                     self.empty_desc.setText(
                         "添加素材后，这里按「字幕 → 配音 → 混音」三步推进；"
-                        "顶部「执行本任务」会一次跑完剩余步骤。")
+                        "顶部「全部执行」会一次跑完队列里剩余步骤。")
                 self.current_task_label.setText("未选择任务")
                 scope_tag = getattr(self, "scope_label", None)
                 if scope_tag is not None:
@@ -252,55 +252,33 @@ class TaskMixin:
             overall.setText(f"{progress}%")
 
     def _refresh_run_buttons(self):
-        """唯一主按钮的状态：无任务禁用，运行中变「停止」。"""
+        """唯一主按钮：固定「全部执行」，永远作用于整个队列。"""
         run_btn = getattr(self, "run_task_btn", None)
         batch_btn = getattr(self, "batch_btn", None)
         if run_btn is None:
             return
         busy = self._batch_executor is not None or any(self._workers.values())
-        has_scope = bool(self.task_queue.current or self._current_group)
         all_tasks = list(self.task_queue.tasks)
         if busy:
             run_btn.setText("停止")
             run_btn.setEnabled(True)
             run_btn.setToolTip("停止当前执行；已完成的步骤会保留")
+        elif not all_tasks:
+            run_btn.setText("全部执行")
+            run_btn.setEnabled(False)
+            run_btn.setToolTip("队列为空，先添加素材")
         else:
-            if self._selected_folder:
-                count = len(self._current_group.tasks) if self._current_group else 0
-                run_btn.setText(f"执行目录（{count}）")
-            elif self._current_group is not None:
-                count = len(self._current_group.tasks)
-                run_btn.setText(f"执行组（{count}）")
-            elif self.task_queue.current is None and all_tasks:
-                # 拖入多个文件后不自动选中最后一条；页头直接汇总整个队列，
-                # 主按钮就是“全部执行”，避免用户误以为只能执行一个。
-                pending = self._pending_tasks(all_tasks)
-                if pending:
-                    run_btn.setText(f"全部执行（{len(pending)}）")
-                    run_btn.setEnabled(True)
-                    run_btn.setToolTip(
-                        f"已识别 {len(all_tasks)} 个任务，其中 {len(pending)} 个"
-                        "有未完成步骤；点击按流水线全部执行")
-                else:
-                    run_btn.setText("全部完成")
-                    run_btn.setEnabled(False)
-                    run_btn.setToolTip("队列内所有任务均已完成")
+            pending = self._pending_tasks(all_tasks)
+            if pending:
+                run_btn.setText("全部执行")
+                run_btn.setEnabled(True)
+                run_btn.setToolTip(
+                    f"队列共 {len(all_tasks)} 个任务，其中 {len(pending)} 个"
+                    "还有未完成步骤；已完成的步骤会自动跳过")
             else:
-                current = self.task_queue.current
-                pending = [s for s in (1, 2, 3)
-                           if current is not None
-                           and current.step_status(s) not in (STEP_DONE, STEP_SKIPPED)]
-                if current is not None and not pending:
-                    run_btn.setText("查看成品")
-                    output = current.step3_output
-                    exists = bool(output) and os.path.exists(output)
-                    run_btn.setEnabled(exists)
-                    run_btn.setToolTip("打开混音成品" if exists
-                                       else "成品文件已不存在，可在步骤卡重新生成")
-                else:
-                    run_btn.setText("执行本任务")
-                    run_btn.setEnabled(has_scope)
-                    run_btn.setToolTip("按 1→2→3 依次执行尚未完成的步骤")
+                run_btn.setText("全部完成")
+                run_btn.setEnabled(False)
+                run_btn.setToolTip("队列内所有任务均已完成")
         if batch_btn is not None:
             batch_btn.setEnabled(not busy and bool(self.task_queue.tasks))
             batch_btn.setToolTip("选择范围与步骤，批量执行多个任务" if not busy
@@ -554,14 +532,14 @@ class TaskMixin:
                        for s in (1, 2, 3))]
 
     def _on_run_task(self):
-        """唯一主按钮：按 1→2→3 执行当前作用域内尚未完成的步骤。"""
+        """唯一主按钮：按 1→2→3 执行整个队列中尚未完成的步骤。"""
         if self._batch_executor is not None or any(self._workers.values()):
             self._on_stop_run()
             return
-        tasks = self._scope_tasks()
+        tasks = list(self.task_queue.tasks)
         if not tasks:
             QMessageBox.information(self, "没有可执行的任务",
-                                    "请先在左侧选择任务或添加素材。")
+                                    "请先在左侧添加素材。")
             return
         pending = self._pending_tasks(tasks)
         if not pending:
@@ -570,17 +548,9 @@ class TaskMixin:
                 self.step_panels[3]._open_output()
                 return
             QMessageBox.information(self, "已全部完成",
-                                    "当前作用域内三个步骤都已完成，无需执行。")
+                                    "队列内所有任务都已完成，无需执行。")
             return
-        if len(pending) > 3:
-            reply = QMessageBox.question(
-                self, "确认执行",
-                f"将对 {len(pending)} 个任务依次执行剩余步骤。\n"
-                "已完成的步骤会自动跳过，执行中可以随时停止。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes)
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        # 不再弹范围确认：主按钮就是“全部执行”，已完成的任务/步骤自动跳过。
         self._start_scope_pipeline(pending)
 
     def _on_stop_run(self):
