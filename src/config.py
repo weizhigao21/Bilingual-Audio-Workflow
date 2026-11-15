@@ -116,7 +116,7 @@ DEFAULT_CONFIG = {
         "streaming_threshold_minutes": 20,
         "enable_batch_parallel": True,
         # 默认关闭：重命名用户源文件夹是破坏性副作用，首次使用应在设置里
-        # 显式勾选；开启后运行时还会再确认一次。
+        # 显式勾选；开启后即为自动执行，不再每次运行确认。
         "folder_prefix": False,
         # 声道角度：新版为"分离度（度数 0–90）+ 居中偏置"两个语义参数
         # （panning.py），旧的 channel_map 三角度仅在两个新键都缺失时迁移读取

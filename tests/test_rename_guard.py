@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from PyQt6.QtWidgets import QMessageBox
+
 from src.task_manager import TaskQueue, STEP_DONE, STEP_SKIPPED
 from src.workflow_gui import rename_mixin
 from src.workflow_gui.rename_mixin import (RenameMixin, normalize_folder,
@@ -175,6 +177,18 @@ class RenameGuardTests(unittest.TestCase):
 
         # 自愈之后，未加前缀的真实文件夹仍能被正常重命名（功能没被修坏）
         Renamer(restored)._do_rename_batch_folders()
+        self.assertTrue((self.root / "双语-album").is_dir())
+
+    def test_rename_runs_without_confirmation_when_setting_on(self):
+        """开启 folder_prefix 后应自动改名，不再弹“是否重命名”确认框。"""
+        queue, group, task, source_dir = self._make_folder_task()
+        renamer = Renamer(queue)
+        # 旧实现看到 run_task_btn 就会走 QMessageBox.question；这里应完全不调用
+        renamer.run_task_btn = object()
+        with mock.patch.object(QMessageBox, "question",
+                               return_value=QMessageBox.StandardButton.No) as question:
+            renamer._do_rename_source_folder(task)
+        question.assert_not_called()
         self.assertTrue((self.root / "双语-album").is_dir())
 
     def test_batch_renames_once_and_dedupes_same_folder(self):

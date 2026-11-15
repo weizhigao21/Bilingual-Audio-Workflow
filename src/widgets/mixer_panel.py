@@ -196,7 +196,7 @@ class MixerConfigPanel(QWidget):
         output.add_widget_row(self.suffix_check)
 
         self.folder_prefix_check = QCheckBox(
-            "文件夹导入混音后重命名源文件夹（添加\"双语-\"前缀，执行前会再确认）")
+            "文件夹导入混音后自动重命名源文件夹（添加\"双语-\"前缀）")
         self.folder_prefix_check.toggled.connect(self._save)
         output.add_widget_row(self.folder_prefix_check)
 
