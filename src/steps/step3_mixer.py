@@ -253,10 +253,14 @@ def _mix_single_task_impl(task: TaskInfo, config: WorkflowConfig,
             original_audio = original_audio.set_sample_width(4)
         align_onset = cfg.get("align_onset", False)
         content_alignment = cfg.get("content_alignment", False)
+        fit_clip_to_gap = cfg.get("fit_clip_to_gap", True)
+        fit_clip_max_speed = cfg.get("fit_clip_max_speed", 2.0)
         _log(
             f"[混音] 参数: 音量={cfg.get('volume_db', 0.0)}dB, "
             f"模式={cfg.get('auto_volume', 'off')}, 起始对齐={align_onset}, "
-            f"内容对齐={content_alignment}, 峰值保护={cfg.get('peak_mode', 'peak')}, "
+            f"内容对齐={content_alignment}, 字幕间隔变速={fit_clip_to_gap}"
+            f"（最大 {fit_clip_max_speed}x）, "
+            f"峰值保护={cfg.get('peak_mode', 'peak')}, "
             f"高质量重采样={cfg.get('high_quality_resample', True)}"
         )
         with perf.span("混音累加"):
@@ -270,6 +274,8 @@ def _mix_single_task_impl(task: TaskInfo, config: WorkflowConfig,
                 high_quality=cfg.get("high_quality_resample", True),
                 stop_check=stop_check,
                 max_workers=cfg.get("thread_count", 4),
+                fit_clip_to_gap=fit_clip_to_gap,
+                fit_clip_max_speed=fit_clip_max_speed,
             )
         _progress(85)
 

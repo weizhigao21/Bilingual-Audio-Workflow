@@ -105,6 +105,10 @@ DEFAULT_CONFIG = {
         "channel_detect": True,
         "align_onset": True,
         "content_alignment": False,
+        # 字幕密集时，按“到下一字幕起点”的间隔给超长配音加速；超过最大
+        # 倍率仍超长则截断尾部，保证不重叠。默认开启，可单独关闭。
+        "fit_clip_to_gap": True,
+        "fit_clip_max_speed": 2.0,
         "auto_volume": "fixed",
         "peak_mode": "peak",
         "high_quality_resample": True,

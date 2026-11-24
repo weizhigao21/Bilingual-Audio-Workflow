@@ -37,6 +37,38 @@ def resample_audio(audio, sample_rate, stop_check=None, high_quality=True):
                            channels=audio.channels)
 
 
+def _atempo_filter(speed):
+    """构造 atempo 滤镜链；单实例超过 2.0 时需要拆成多级。"""
+    speed = max(0.25, float(speed))
+    parts = []
+    while speed > 2.0:
+        parts.append("atempo=2.0")
+        speed /= 2.0
+    while speed < 0.5:
+        parts.append("atempo=0.5")
+        speed /= 0.5
+    parts.append(f"atempo={speed:.6f}")
+    return ",".join(parts)
+
+
+def time_stretch_audio(audio, speed, stop_check=None):
+    """保持音高的变速（ffmpeg atempo），返回 32bit PCM 片段。
+
+    只用于把超出字幕间隔的配音压短；speed=1.0 时原样返回。
+    """
+    speed = float(speed)
+    if speed <= 1.0 + 1e-6 or len(audio) == 0:
+        return audio
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"] + _pcm_input(audio) + [
+        "-af", _atempo_filter(speed),
+        "-ar", str(audio.frame_rate), "-ac", str(audio.channels),
+        "-c:a", "pcm_s32le", "-f", "s32le", "pipe:1",
+    ]
+    raw = _run_ffmpeg(cmd, stop_check=stop_check, input_data=audio.raw_data)
+    return audio.__class__(raw, sample_width=4, frame_rate=audio.frame_rate,
+                           channels=audio.channels)
+
+
 def export_audio_ffmpeg(audio_segment, output_path, format_type="mp3",
                         bitrate="192k", sample_rate=44100, channels=2,
                         stop_check=None, high_quality=True,

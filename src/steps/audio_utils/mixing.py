@@ -12,7 +12,7 @@ from .detection import find_nearest_onset, detect_voice_onset
 from .rms import (compute_rms_db, compute_rms_envelope,
                   compute_speech_rms_db, interpolate_envelope,
                   mask_speech_envelope, speech_intervals_from_positions)
-from .ffmpeg_utils import resample_audio
+from .ffmpeg_utils import resample_audio, time_stretch_audio
 from .. import perf
 
 # 单声道配音经恒定功率声像定位后，总功率相对“双声道同幅原音”会低
@@ -23,6 +23,19 @@ _PAN_COMP_DB = 10.0 * math.log10(2.0)
 def _check_stop(stop_check):
     if stop_check is not None and stop_check():
         raise RuntimeError("用户已停止处理")
+
+
+def _fit_target_frames(all_pos_ms, index, actual_pos_ms, total_frames,
+                       frame_rate, guard_ms=10):
+    """当前片段到下一字幕起点（末条到源音频结尾）的可用帧数。"""
+    if index + 1 < len(all_pos_ms):
+        end_ms = all_pos_ms[index + 1]
+    else:
+        end_ms = total_frames * 1000.0 / frame_rate
+    available_ms = end_ms - actual_pos_ms - max(0, guard_ms)
+    if available_ms <= 0:
+        return 0
+    return max(1, int(round(available_ms * frame_rate / 1000.0)))
 
 
 def _finish_mix(samples, sample_width, mode, stop_check=None, output_path=None):
@@ -166,7 +179,8 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
                    align_onset=False, content_alignment=False,
                    peak_mode="peak", high_quality=True, stop_check=None,
                    output_path=None, accumulator_path=None, item_callback=None,
-                   max_workers=4):
+                   max_workers=4, fit_clip_to_gap=False, fit_clip_max_speed=2.0,
+                   fit_gap_guard_ms=10):
     if np is None or not HAS_NUMPY:
         raise RuntimeError("高质量混音需要 numpy，请安装项目依赖")
 
@@ -335,6 +349,49 @@ def mix_with_numpy(original, mix_items, volume_db=0, auto_volume="off",
             if mix_mono.sample_width != sample_width:
                 scale = 2 ** (sample_width * 8 - 1) / 2 ** (mix_mono.sample_width * 8 - 1)
                 mix_raw *= scale
+
+            # 字幕密集时，上一条配音常比“到下一字幕起点”的间隔长；按间隔
+            # 做保持音高的加速，仍超长则截掉尾部，保证相邻片段不重叠。
+            if fit_clip_to_gap and len(all_pos_ms) > 1:
+                target_frames = _fit_target_frames(
+                    all_pos_ms, i, actual_pos_ms, total_frames, frame_rate,
+                    fit_gap_guard_ms)
+                if target_frames and len(mix_raw) > target_frames:
+                    speed = len(mix_raw) / target_frames
+                    capped = min(speed, max(1.0, float(fit_clip_max_speed)))
+                    if capped > 1.01:
+                        try:
+                            src_dtype = dtype_map.get(sample_width, np.int16)
+                            seg = original.__class__(
+                                np.rint(mix_raw).astype(src_dtype).tobytes(),
+                                sample_width=sample_width,
+                                frame_rate=frame_rate, channels=1,
+                            )
+                            with perf.span("片段变速"):
+                                stretched = time_stretch_audio(
+                                    seg, capped, stop_check=stop_check)
+                            mix_mono = stretched
+                            mix_raw = np.frombuffer(
+                                stretched.raw_data,
+                                dtype=dtype_map.get(stretched.sample_width, np.int16),
+                            ).astype(float_dtype)
+                            if stretched.sample_width != sample_width:
+                                scale = (2 ** (sample_width * 8 - 1)
+                                         / 2 ** (stretched.sample_width * 8 - 1))
+                                mix_raw *= scale
+                            if i < 8:
+                                logger.debug(
+                                    f"[混音] 片段{i} 按字幕间隔加速 {capped:.3f}x: "
+                                    f"{len(seg)}ms → {len(stretched)}ms "
+                                    f"(目标 {target_frames * 1000 / frame_rate:.0f}ms)")
+                        except Exception as exc:
+                            logger.warning(
+                                f"[混音] 片段{i} 变速失败，改为直接截断: {exc}")
+                    if len(mix_raw) > target_frames:
+                        logger.debug(
+                            f"[混音] 片段{i} 达到最大倍速仍超长，"
+                            f"截断 {len(mix_raw) - target_frames} 帧")
+                        mix_raw = mix_raw[:target_frames]
 
             if original_rms_db is not None:
                 seg_rms_db = compute_rms_db(mix_mono)

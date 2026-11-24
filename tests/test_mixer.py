@@ -22,7 +22,9 @@ from src.steps.audio_utils.rms import (
 )
 from src.steps.audio_utils.detection import detect_voice_onset
 from src.steps.audio_utils.common import _submit_pan_detection
-from src.steps.audio_utils.ffmpeg_utils import resample_audio, _run_ffmpeg, export_audio_ffmpeg
+from src.steps.audio_utils.ffmpeg_utils import (
+    resample_audio, time_stretch_audio, _run_ffmpeg, export_audio_ffmpeg,
+)
 from src.steps.step3_mixer import mix_single_task, _export_wav_24bit, MixerBatchWorker
 from src.steps.audio_utils import clear_mix_cache
 from src.task_manager import TaskInfo
@@ -290,6 +292,59 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b'previous result')
             self.assertEqual(list(Path(folder).glob('.mix-*')), [])
             clear_mix_cache()
+
+    @staticmethod
+    def _spectrum_at(segment, start_ms, duration_ms=200, sample_width=None):
+        """取指定时间窗的单声道幅度谱，用于判断两段音是否重叠。"""
+        width = sample_width or segment.sample_width
+        dtype = {1: np.int8, 2: np.int16, 4: np.int32}[width]
+        data = np.frombuffer(segment.raw_data, dtype=dtype).astype(float)
+        if segment.channels == 2:
+            data = data.reshape(-1, 2).mean(axis=1)
+        sr = segment.frame_rate
+        start = int(start_ms * sr / 1000)
+        chunk = data[start:start + int(duration_ms * sr / 1000)].copy()
+        chunk *= np.hanning(len(chunk))
+        return np.fft.rfftfreq(len(chunk), 1 / sr), np.abs(np.fft.rfft(chunk))
+
+    def test_time_stretch_preserves_pitch_and_shortens(self):
+        seg = audio(tone(1.0, frequency=440))
+        out = time_stretch_audio(seg, 1.5)
+        self.assertAlmostEqual(len(out), 1000 / 1.5, delta=30)
+        freqs, spec = self._spectrum_at(out, 150, 300, sample_width=4)
+        self.assertAlmostEqual(freqs[int(np.argmax(spec))], 440, delta=8)
+
+    def test_fit_clip_to_gap_prevents_overlap(self):
+        source = AudioSegment.silent(duration=1200, frame_rate=48000)
+        clips = [
+            (audio(tone(0.9, frequency=440)), 0, 180),
+            (audio(tone(0.4, frequency=880)), 500, 180),
+        ]
+        out = mix_with_numpy(
+            source, clips, auto_volume='off', align_onset=False,
+            fit_clip_to_gap=True, fit_clip_max_speed=2.0,
+        )
+        freqs, spec = self._spectrum_at(out, 500, 200)
+        e440 = spec[int(np.argmin(np.abs(freqs - 440)))]
+        e880 = spec[int(np.argmin(np.abs(freqs - 880)))]
+        self.assertGreater(e880, e440 * 3,
+                           "上一条应被压到 500ms 前结束，不能压住下一条")
+
+    def test_fit_clip_caps_speed_and_trims_tail(self):
+        source = AudioSegment.silent(duration=1200, frame_rate=48000)
+        clips = [
+            (audio(tone(2.0, frequency=440)), 0, 180),
+            (audio(tone(0.2, frequency=880)), 500, 180),
+        ]
+        out = mix_with_numpy(
+            source, clips, auto_volume='off', align_onset=False,
+            fit_clip_to_gap=True, fit_clip_max_speed=1.5,
+        )
+        freqs, spec = self._spectrum_at(out, 500, 200)
+        e440 = spec[int(np.argmin(np.abs(freqs - 440)))]
+        e880 = spec[int(np.argmin(np.abs(freqs - 880)))]
+        self.assertGreater(e880, e440 * 3,
+                           "达到最大倍速后仍超长时，尾部应被截断")
 
     def test_video_to_audio_and_video_and_wav_depths(self):
         import wave

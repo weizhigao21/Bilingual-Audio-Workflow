@@ -187,6 +187,25 @@ class MixerConfigPanel(QWidget):
         self.content_align_check = QCheckBox("内容对齐（用原音频人声起始点纠正时间戳）")
         self.content_align_check.toggled.connect(self._save)
         volume.add_widget_row(self.content_align_check)
+
+        self.fit_gap_check = QCheckBox("字幕密集时自动加速配音（避免相邻片段重叠）")
+        self.fit_gap_check.setToolTip(
+            "上一条配音长于“到下一字幕起点”的间隔时，按间隔做保持音高的加速；"
+            "达到最大倍率仍超长时截掉尾部，保证不压住下一条。")
+        self.fit_gap_check.toggled.connect(self._on_fit_toggle)
+        volume.add_widget_row(self.fit_gap_check)
+
+        self.fit_speed_spin = QDoubleSpinBox()
+        self.fit_speed_spin.setRange(1.0, 3.0)
+        self.fit_speed_spin.setSingleStep(0.1)
+        self.fit_speed_spin.setDecimals(1)
+        self.fit_speed_spin.setSuffix("×")
+        self.fit_speed_spin.setToolTip(
+            "配音最多加速到该倍数；设为 1.0 表示不加速，只截断超出间隔的尾部。")
+        self.fit_speed_spin.valueChanged.connect(self._save)
+        volume.add_row(
+            "最大加速", "超过字幕间隔的配音最多加速到该倍数，仍超长则截断尾部",
+            self.fit_speed_spin)
         layout.addWidget(volume)
 
         # 输出选项
@@ -307,6 +326,11 @@ class MixerConfigPanel(QWidget):
         self._refresh_separation_readout(value)
         self._save()
 
+    def _on_fit_toggle(self, checked: bool):
+        """关闭字幕间隔变速时，最大倍率不再有意义，灰显但保留数值。"""
+        self.fit_speed_spin.setEnabled(checked)
+        self._save()
+
     def _load_values(self):
         cfg = self.config.mixer_cfg
         widgets = [self.output_row.edit, self.format_combo, self.preset_combo,
@@ -315,6 +339,7 @@ class MixerConfigPanel(QWidget):
                    self.auto_vol_combo, self.peak_combo, self.channel_detect_check,
                    self.sep_slider, self.center_segment,
                    self.align_check, self.content_align_check, self.resample_check,
+                   self.fit_gap_check, self.fit_speed_spin,
                    self.suffix_check, self.folder_prefix_check,
                    self.output_prefix_check,
                    self.skip_check, self.streaming_spin,
@@ -372,6 +397,10 @@ class MixerConfigPanel(QWidget):
             # 其他选项
             self.align_check.setChecked(cfg.get("align_onset", True))
             self.content_align_check.setChecked(cfg.get("content_alignment", False))
+            fit_enabled = cfg.get("fit_clip_to_gap", True)
+            self.fit_gap_check.setChecked(fit_enabled)
+            self.fit_speed_spin.setValue(float(cfg.get("fit_clip_max_speed", 2.0)))
+            self.fit_speed_spin.setEnabled(fit_enabled)
             self.resample_check.setChecked(cfg.get("high_quality_resample", True))
             self.suffix_check.setChecked(cfg.get("add_suffix", True))
             self.folder_prefix_check.setChecked(cfg.get("folder_prefix", False))
@@ -404,6 +433,8 @@ class MixerConfigPanel(QWidget):
         cfg["channel_center_bias"] = self.center_segment.current_data()
         cfg["align_onset"] = self.align_check.isChecked()
         cfg["content_alignment"] = self.content_align_check.isChecked()
+        cfg["fit_clip_to_gap"] = self.fit_gap_check.isChecked()
+        cfg["fit_clip_max_speed"] = self.fit_speed_spin.value()
         cfg["high_quality_resample"] = self.resample_check.isChecked()
         cfg["add_suffix"] = self.suffix_check.isChecked()
         cfg["folder_prefix"] = self.folder_prefix_check.isChecked()
