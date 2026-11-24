@@ -17,8 +17,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 
 from src.steps.audio_utils import (
-    CENTER_BIAS_CHOICES, SEPARATION_MAX, angles_from_config, config_from_legacy,
-    describe, params_from_config,
+    CENTER_BIAS_CHOICES, CENTER_BIAS_MAX, CENTER_BIAS_MIN, SEPARATION_MAX,
+    angles_from_config, center_bias_label, config_from_legacy, describe,
+    params_from_config,
 )
 from src.steps.audio_utils.detection import (
     FRAME_LEN_MAX, FRAME_LEN_MIN, PAN_IMBALANCE_THRESHOLD, TARGET_FRAME_MS,
@@ -92,17 +93,26 @@ class PanningParamsTests(unittest.TestCase):
         self.assertEqual(
             params_from_config({"channel_separation": 250})[0], int(SEPARATION_MAX))
 
-    def test_bias_snaps_to_nearest_choice(self):
-        for raw, expected in ((-90, -30), (-20, -30), (-10, 0), (10, 0),
-                              (20, 30), (90, 30)):
+    def test_bias_is_continuous_and_clamped(self):
+        # 滑块是 0–180° 连续角度，保存为 -90..90 的偏置；不再吸附到三档。
+        for raw, expected in (
+                (-120, CENTER_BIAS_MIN), (-45, -45), (-20, -20), (0, 0),
+                (10, 10), (20, 20), (90, 90), (120, CENTER_BIAS_MAX)):
             self.assertEqual(
                 params_from_config({"channel_center_bias": raw})[1], expected,
-                f"偏置 {raw} 应就近取档到 {expected}")
+                f"偏置 {raw} 应保留为 {expected}")
 
     def test_all_bias_choices_are_representable(self):
         for bias in CENTER_BIAS_CHOICES:
             _, got = params_from_config({"channel_center_bias": bias})
             self.assertEqual(got, bias)
+
+    def test_center_bias_label_covers_continuous_range(self):
+        self.assertEqual(center_bias_label(-90), "偏左 90°")
+        self.assertEqual(center_bias_label(-45), "偏左 45°")
+        self.assertEqual(center_bias_label(0), "正中")
+        self.assertEqual(center_bias_label(20), "偏右 20°")
+        self.assertEqual(center_bias_label(90), "偏右 90°")
 
 
 class LegacyMigrationTests(unittest.TestCase):
@@ -118,20 +128,21 @@ class LegacyMigrationTests(unittest.TestCase):
         self.assertEqual(angles["left"], 135.0, "原音在左 → 配音角度必须仍是 135°")
         self.assertEqual(angles["right"], 45.0, "原音在右 → 配音角度必须仍是 45°")
 
-    def test_both_angle_snaps_to_nearest_bias(self):
-        # 110° 距 90° 为 +20°，就近取档到 +30°（偏右）
+    def test_both_angle_is_preserved_exactly(self):
+        # 连续角度滑块不再吸附三档，旧配置的 both=110° 应原样保留。
         angles = angles_from_config(
             {"channel_map": {"left": 135, "both": 110, "right": 45}})
-        self.assertEqual(angles["both"], 120.0)
+        self.assertEqual(angles["both"], 110.0)
 
     def test_shipped_defaults_migrate_exactly(self):
-        """旧出厂默认 155/135/25 → 分离度 65，角度必须一模一样。"""
+        """旧出厂默认 155/135/25 → 分离度 65，三个角度都必须一模一样。"""
         legacy = {"left": 155, "both": 135, "right": 25}
         separation, bias = params_from_config({"channel_map": legacy})
-        self.assertEqual((separation, bias), (65, 30))
+        self.assertEqual((separation, bias), (65, 45))
         angles = angles_from_config({"channel_map": legacy})
         self.assertEqual(angles["left"], 155.0)
         self.assertEqual(angles["right"], 25.0)
+        self.assertEqual(angles["both"], 135.0)
 
     def test_config_from_legacy_round_trip(self):
         legacy = {"left": 150, "both": 120, "right": 30}
@@ -297,7 +308,10 @@ class MixerPanelPanningTests(unittest.TestCase):
         panel = panel_cls(cfg)
         self.addCleanup(panel.deleteLater)
         self.assertEqual(panel.sep_slider.value(), 45)
-        self.assertEqual(panel.center_segment.current_data(), 30)
+        self.assertEqual(panel.center_slider.value(), 120)
+        self.assertEqual(panel.center_slider.minimum(), 0)
+        self.assertEqual(panel.center_slider.maximum(), 180)
+        self.assertEqual(panel.center_readout.text(), "120° · 偏右")
         self.assertEqual(panel.sep_readout.text(), "偏转 45° → 135° / 45°")
 
     def test_slider_writes_config_and_readout(self):
@@ -310,22 +324,28 @@ class MixerPanelPanningTests(unittest.TestCase):
         self.assertEqual(cfg.saved, before + 1)
         self.assertEqual(panel.sep_readout.text(), "偏转 80° → 170° / 10°")
 
-    def test_segment_click_updates_angles(self):
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtTest import QTest
+    def test_center_slider_updates_config_and_angles(self):
         cfg, panel_cls = self._config()
         panel = panel_cls(cfg)
         self.addCleanup(panel.deleteLater)
-        buttons = [b for b, _ in panel.center_segment._buttons]
-        self.assertEqual([b.text() for b in buttons], ["偏左", "正中", "偏右"])
-
-        QTest.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
+        panel.center_slider.setValue(60)
         self.assertEqual(cfg.mixer_cfg["channel_center_bias"], -30)
+        self.assertEqual(panel.center_readout.text(), "60° · 偏左")
         angles = angles_from_config(cfg.mixer_cfg)
         self.assertEqual(angles["both"], 60.0)
-        # left/right 只由分离度决定，切换"居中偏置"不影响它们
+        # left/right 只由分离度决定，切换"居中角度"不影响它们
         self.assertEqual(angles["left"], 135.0)
         self.assertEqual(angles["right"], 45.0)
+
+    def test_center_slider_accepts_angle_between_old_presets(self):
+        """旧版只有 60/90/120 三档；滑块要能选 75° 这种中间值。"""
+        cfg, panel_cls = self._config()
+        panel = panel_cls(cfg)
+        self.addCleanup(panel.deleteLater)
+        panel.center_slider.setValue(75)
+        self.assertEqual(cfg.mixer_cfg["channel_center_bias"], -15)
+        self.assertEqual(panel.center_readout.text(), "75° · 偏左")
+        self.assertEqual(angles_from_config(cfg.mixer_cfg)["both"], 75.0)
 
     def test_legacy_channel_map_migrates_into_controls(self):
         cfg, panel_cls = self._config()
@@ -333,7 +353,7 @@ class MixerPanelPanningTests(unittest.TestCase):
         panel = panel_cls(cfg)
         self.addCleanup(panel.deleteLater)
         self.assertEqual(panel.sep_slider.value(), 45)
-        self.assertEqual(panel.center_segment.current_data(), 30)
+        self.assertEqual(panel.center_slider.value(), 110)
         self.assertEqual(panel.sep_readout.text(), "偏转 45° → 135° / 45°")
 
     def test_panel_and_mixer_agree_on_angles(self):

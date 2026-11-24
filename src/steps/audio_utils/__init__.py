@@ -13,8 +13,10 @@ from .detection import (
     detect_voice_onset, find_nearest_onset, detect_angles_parallel,
 )
 from .panning import (
-    CENTER_BIAS_CHOICES, CENTER_BIAS_LABELS, SEPARATION_MAX,
-    angles_from_config, config_from_legacy, describe, params_from_config,
+    CENTER_BIAS_CHOICES, CENTER_BIAS_LABELS,
+    CENTER_BIAS_MAX, CENTER_BIAS_MIN,
+    SEPARATION_MAX, angles_from_config, center_bias_label,
+    config_from_legacy, describe, params_from_config,
 )
 from .rms import (
     compute_rms_db, _mono_float_from_frames,
@@ -32,8 +34,10 @@ __all__ = [
     "_mix_files_cache", "parse_filename", "get_mix_audio_files", "clear_mix_cache",
     "_detect_voice_channel_from_samples", "detect_voice_channel",
     "detect_voice_onset", "find_nearest_onset", "detect_angles_parallel",
-    "CENTER_BIAS_CHOICES", "CENTER_BIAS_LABELS", "SEPARATION_MAX",
-    "angles_from_config", "config_from_legacy", "describe", "params_from_config",
+    "CENTER_BIAS_CHOICES", "CENTER_BIAS_LABELS",
+    "CENTER_BIAS_MAX", "CENTER_BIAS_MIN",
+    "SEPARATION_MAX", "angles_from_config", "center_bias_label",
+    "config_from_legacy", "describe", "params_from_config",
     "compute_rms_db", "_mono_float_from_frames",
     "compute_rms_envelope", "interpolate_envelope",
     "mix_with_numpy",
