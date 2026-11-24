@@ -99,6 +99,34 @@ class TTSProfileTests(unittest.TestCase):
                 worker.run()
             self.assertEqual([t[2] for t in captured['tasks']], ['七', '2024'])
 
+    def test_srt_accepts_one_to_three_digit_milliseconds(self):
+        """回归：两位毫秒（00:00:00,08）曾整份解析失败。"""
+        srt = (
+            "1\n00:00:00,08 --> 00:00:01,04\n第一句\n\n"
+            "2\n00:00:01,440 --> 00:00:02,16\n第二句\n\n"
+            "3\n00:00:02,8 --> 00:00:03,000\n第三句\n\n"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            subtitle = Path(folder) / 'source.srt'
+            subtitle.write_text(srt, encoding='utf-8')
+            config = {
+                'tts_mode': 'edge', 'lrc_files': [str(subtitle)],
+                'output_dir': str(Path(folder) / 'out'),
+                'subtitle_md5': 'abc', 'prevent_sleep': False,
+                'edge_threads': 1, 'filter_pure_number_lines': False,
+            }
+            captured = {}
+            with patch('src.steps.tts_worker.AudioCache', return_value=FakeCache()):
+                worker = TTSWorker(config)
+            with patch.object(TTSWorker, '_run_edge_tts',
+                              lambda self, pending, *a, **k: captured.update(
+                                  tasks=list(pending))):
+                worker.run()
+            self.assertEqual([t[1] for t in captured['tasks']],
+                             ['00:00:00.08', '00:00:01.44', '00:00:02.80'])
+            self.assertEqual([t[2] for t in captured['tasks']],
+                             ['第一句', '第二句', '第三句'])
+
     def test_changing_tts_profile_invalidates_active_task_and_mix(self):
         with tempfile.TemporaryDirectory() as folder:
             old={'tts_mode':'edge','edge_voice':'v1'}

@@ -230,8 +230,10 @@ class TTSWorker(QThread):
                     current_text = []
                     current_timestamp = None
 
+                    # 毫秒位数以 1-3 位都接受：部分字幕工具会输出
+                    # “00:00:00,08”这类两位毫秒，严格按三位匹配会整份丢弃。
                     srt_time_pattern = re.compile(
-                        r"^(\d{2}):(\d{2}):(\d{2}),(\d{3}) -->"
+                        r"^(\d{2}):(\d{2}):(\d{2})[,.](\d{1,3}) -->"
                     )
 
                     for line in lines:
@@ -259,7 +261,9 @@ class TTSWorker(QThread):
                             hours = time_match.group(1)
                             minutes = time_match.group(2)
                             seconds = time_match.group(3)
-                            milliseconds = time_match.group(4)[:2]
+                            # 统一成两位毫秒写进时间戳：08→80ms、
+                            # 8→800ms、080→80ms，后续文件名/排序口径不变。
+                            milliseconds = time_match.group(4).ljust(3, "0")[:2]
 
                             timestamp_str = (
                                 f"{hours}:{minutes}:{seconds}.{milliseconds}"
